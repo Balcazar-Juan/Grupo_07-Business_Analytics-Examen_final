@@ -21,7 +21,7 @@ python scripts/audit_data.py
 streamlit run app.py
 ```
 
-La carga inicial puede tardar varios minutos porque consulta hasta cinco años de historia y valida cada modelo en varios cortes temporales. Si la base está vacía o inaccesible, Streamlit muestra datos ficticios con una advertencia visible. La vista de IA queda deshabilitada en ese modo.
+La carga inicial puede tardar varios minutos porque consulta hasta cinco años de historia y valida cada modelo en varios cortes temporales. La aplicación gerencial solo muestra datos reales: si Atlas está vacío o inaccesible, presenta el error de conexión.
 
 ## Operación
 
@@ -38,10 +38,10 @@ Mobula puede responder HTTP 401/403 según la clave o el plan. En ese caso la ca
 
 ## Interpretación
 
-- **Descriptivo:** snapshot más reciente, serie de cierres, ranking, capitalización y comparación porcentual normalizada. Las métricas de periodo usan el primer y último cierre observados y advierten cobertura parcial.
-- **Predictivo:** XGBoost pronostica el retorno logarítmico del día siguiente; la trayectoria se genera recursivamente hasta `FORECAST_DAYS`. La banda P10–P90 es una aproximación con la desviación de errores de validación temporal. Las fechas de menor/mayor cierre proyectado son extremos del escenario central, no oportunidades garantizadas.
+- **Descriptivo:** pulso de la moneda, evolución de cierres, amplitud del mercado, mayores movimientos, capitalización, ranking y comparación porcentual normalizada.
+- **Predictivo:** XGBoost pronostica el retorno logarítmico del día siguiente; la trayectoria se genera recursivamente hasta `FORECAST_DAYS`. La vista individual separa histórico y proyección, muestra un rango P10–P90 al horizonte y una tabla de hitos. La comparación usa cambios porcentuales desde el precio base. Las fechas de menor/mayor cierre proyectado son extremos del escenario central, no oportunidades garantizadas.
 - **Prescriptivo:** Gemini recibe solo cifras de un `forecast_run_id`, métricas de validación y cobertura. Devuelve una postura para evaluar, riesgo, tres escenarios condicionales y señales a vigilar. El resultado estructurado se guarda por huella de evidencia en `ai_recommendations`; una nueva corrida o horizonte produce nueva evidencia. Requiere `GEMINI_API_KEY`. No se llama a Gemini en cada recarga de página.
-- **Calidad:** la pestaña muestra cobertura de la ventana solicitada y si XGBoost mejora el baseline de retorno cero. Una cobertura alta no garantiza una predicción precisa.
+La confiabilidad del modelo aparece en el pronóstico y en la postura de IA cuando XGBoost no supera el baseline de retorno cero. La auditoría técnica detallada permanece disponible mediante `scripts/audit_data.py`.
 
 El horizonte de un año requiere `FORECAST_DAYS=365` y volver a generar pronósticos. Si solo hay 360 días, la interfaz lo advierte.
 

@@ -51,11 +51,15 @@ def generate_recommendation(evidence):
         "Si el modelo no supera el baseline o la cobertura es baja, prioriza ESPERAR u OBSERVAR. "
         "Datos: " + json.dumps(evidence, ensure_ascii=False, default=str)
     )
-    response = genai.Client(api_key=key).models.generate_content(
-        model=model, contents=prompt,
-        config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=SCHEMA),
-    )
-    result = json.loads(response.text or "{}")
+    # Conservar vivo el cliente hasta leer la respuesta; una instancia temporal
+    # puede cerrarse antes de que termine la petición en algunos entornos.
+    with genai.Client(api_key=key) as client:
+        response = client.models.generate_content(
+            model=model, contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=SCHEMA),
+        )
+        response_text = response.text
+    result = json.loads(response_text or "{}")
     missing = set(SCHEMA["required"]) - result.keys()
     if missing or result.get("postura") not in SCHEMA["properties"]["postura"]["enum"]:
         raise ValueError("Gemini devolvió una respuesta incompleta o inválida")
