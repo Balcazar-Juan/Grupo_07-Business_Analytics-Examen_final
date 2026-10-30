@@ -14,6 +14,8 @@ from src.etl.history import load_price_history, load_ohlcv, load_binance_ohlcv, 
 from src.ml.model import train_all, forecast_all
 from src.config import settings
 from src.etl.powerbi import publish_powerbi_layer
+from src.dashboard.ai import generate_all
+import os
 
 
 def main(daily=False, train=False):
@@ -48,6 +50,9 @@ def main(daily=False, train=False):
             details["forecast_days"] = settings.forecast_days
 
         details["powerbi"] = publish_powerbi_layer()
+        details["ai"] = generate_all()
+        if os.getenv("GITHUB_ACTIONS") == "true" and details["ai"]["status"] != "ok":
+            raise RuntimeError(f"Dictámenes Gemini incompletos: {details['ai']}")
 
         log_run(run_name, "success", started, details)
         print("OK", details)

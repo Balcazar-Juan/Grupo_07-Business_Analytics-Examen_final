@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import re
+from urllib.parse import urlparse
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -17,7 +19,6 @@ except FileNotFoundError:
 
 from src.dashboard.data import load_real
 from src.dashboard.logic import HORIZONS, money, period_stats, forecast_stats
-from src.dashboard.ai import cached_recommendation, generate_recommendation
 
 BG, PANEL, GRID = "#0a1020", "#101a2e", "#28344b"
 CYAN, GOLD, GREEN, RED = "#51c8e8", "#f6c65e", "#2dd4a4", "#fa7582"
@@ -183,6 +184,52 @@ with descriptive:
     fig.add_hline(y=0, line_color="#78869c", line_dash="dot")
     st.plotly_chart(fig, width="stretch")
     st.caption("El 0 % es el primer cierre disponible de cada moneda en el periodo. Así se comparan tendencias sin mezclar precios de distinto tamaño.")
+    st.subheader("Noticias y sentimiento")
+    news_all = data["news"]
+    direct = news_all[news_all["mentioned_coin_ids"].apply(lambda ids: coin_id in ids if isinstance(ids, list) else False)]
+    news_view = direct if not direct.empty else news_all
+    scope = f"menciones de {asset.get('symbol')}" if not direct.empty else "mercado general · sin menciones directas recientes"
+    st.caption(f"Últimos 30 días · {scope}. Sentimiento VADER de titulares y resúmenes RSS; no incluye comentarios de redes sociales.")
+    if news_view.empty:
+        st.info("No hay noticias recientes almacenadas. Revisa la ejecución del pipeline de noticias.")
+    else:
+        valid_news = news_view.dropna(subset=["sentiment_compound"])
+        pos = int((news_view.sentiment_label == "POSITIVO").sum())
+        neg = int((news_view.sentiment_label == "NEGATIVO").sum())
+        neutral = int((news_view.sentiment_label == "NEUTRAL").sum())
+        a, b, c, d = st.columns(4)
+        a.metric("Noticias analizadas", len(news_view))
+        b.metric("Tono promedio", f"{valid_news.sentiment_compound.mean():+.2f}" if not valid_news.empty else "Sin dato")
+        c.metric("Positivas", pos)
+        d.metric("Negativas", neg)
+        left, right = st.columns(2, gap="large")
+        with left:
+            fig = figure("Distribución del tono de noticias", 335, "Noticias")
+            fig.add_trace(go.Bar(x=["Positivo", "Neutral", "Negativo"], y=[pos, neutral, neg], marker_color=[GREEN, "#8494aa", RED], text=[pos, neutral, neg], textposition="outside", showlegend=False))
+            fig.update_layout(xaxis_title="Clasificación VADER", yaxis_title="Número de noticias")
+            st.plotly_chart(fig, width="stretch")
+        with right:
+            trend = valid_news.assign(day=valid_news.published_at.dt.floor("D")).groupby("day", as_index=False).agg(score=("sentiment_compound", "mean"), count=("title", "count"))
+            fig = figure("Evolución diaria del sentimiento", 335, "Puntuación media")
+            if not trend.empty:
+                fig.add_trace(go.Bar(x=trend.day, y=trend.score, marker_color=[GREEN if v >= 0 else RED for v in trend.score], customdata=trend["count"], hovertemplate="%{x|%d %b}<br>VADER: %{y:+.2f}<br>%{customdata} noticias<extra></extra>", showlegend=False))
+            fig.add_hline(y=0, line_dash="dot", line_color="#8694a8")
+            fig.update_layout(yaxis_range=[-1, 1])
+            st.plotly_chart(fig, width="stretch")
+        st.markdown("#### Titulares recientes")
+        for _, item in news_view.sort_values("published_at", ascending=False).head(6).iterrows():
+            title = re.sub(r"[\[\]<>]", "", str(item.get("title") or "Sin título"))
+            url = str(item.get("url") or "")
+            host = (urlparse(url).hostname or "").lower()
+            badge = {"POSITIVO": "🟢", "NEGATIVO": "🔴"}.get(item.get("sentiment_label"), "⚪")
+            if url.startswith("https://") and any(host == d or host.endswith("." + d) for d in ("coindesk.com", "cointelegraph.com", "decrypt.co")):
+                st.markdown(f"{badge} [{title}]({url})")
+            else:
+                st.write(f"{badge} {title}")
+            st.caption(f"{item.get('source','Fuente')} · {pd.to_datetime(item['published_at'], utc=True):%d/%m %H:%M UTC} · VADER {float(item['sentiment_compound']):+.2f}" if pd.notna(item.get("sentiment_compound")) else str(item.get("source", "Fuente")))
+        latest_news = pd.to_datetime(news_view.published_at.max(), utc=True)
+        if (pd.Timestamp.now(tz="UTC") - latest_news).days > 3:
+            st.warning("Los últimos titulares almacenados tienen más de tres días; el sentimiento puede estar desactualizado.")
     st.dataframe(rank.sort_values("Ranking"), width="stretch", hide_index=True, column_config={
         "Precio USD": st.column_config.NumberColumn("Precio USD", format="$%.4f"),
         "24 h %": st.column_config.NumberColumn("24 h %", format="%+.2f%%"),
@@ -270,55 +317,78 @@ with predictive:
             })
 
 with prescriptive:
-    st.subheader("Escenarios para decidir qué vigilar")
-    st.markdown('<div class="lead">Gemini resume un pronóstico real y sus límites. La recomendación es una postura para evaluar, no una orden de compra o venta.</div>', unsafe_allow_html=True)
+    st.subheader("Dictamen y escenarios de IA")
+    st.markdown('<div class="lead">El workflow actualiza el dictamen con Gemini después de refrescar mercado y noticias. Se muestra aquí el último análisis guardado para la moneda.</div>', unsafe_allow_html=True)
+    recommendation = data["recommendations"].get(coin_id)
     run = data["runs"].get(coin_id)
-    future = data["forecasts"][data["forecasts"].coin_id == coin_id].sort_values("forecast_date").head(horizon)
-    result = forecast_stats(future, float((run or {}).get("base_price") or 0), horizon)
-    if not run or not result:
-        st.info("Selecciona una moneda con pronóstico vigente para ver escenarios y generar el análisis de IA.")
+    base_price = float(snap.get("price") or 0)
+    verdict_horizon = int((recommendation or {}).get("horizon_days") or 30)
+    future = data["forecasts"][data["forecasts"].coin_id == coin_id].sort_values("forecast_date")
+    future = future[future.forecast_date >= pd.Timestamp.now(tz="UTC").normalize()].head(verdict_horizon)
+    result = forecast_stats(future, base_price, verdict_horizon)
+    if not result:
+        st.info("Aún no hay un pronóstico vigente para esta moneda. El dictamen requiere un modelo y un precio actual.")
     else:
-        base_price = float(run["base_price"])
-        q = data["quality"].get(coin_id, {})
-        m = data["metrics"].get(coin_id, {})
-        evidence = {"coin_id": coin_id, "symbol": asset.get("symbol"), "horizon_days": horizon, "forecast_run_id": run["forecast_run_id"], "base_date": str(run.get("base_date")), "base_price_usd": round(base_price, 8), "end_date": str(result["end"]), "central_price_usd": round(result["end_price"], 8), "variation_pct": round(result["variation_pct"], 3), "p10_usd": round(result["p10"], 8), "p90_usd": round(result["p90"], 8), "coverage_pct": q.get("requested_window_coverage_pct"), "model_mae": m.get("mae_log_return"), "baseline_mae": m.get("baseline_mae_log_return"), "beats_baseline": m.get("beats_zero_return_baseline"), "model_trained_at": str(m.get("trained_at"))}
-        st.caption(f"{asset.get('symbol')} · {horizon_label} · precio base {money(base_price)} · fecha objetivo {pd.Timestamp(result['end']):%d/%m/%Y}")
-        a, b, c = st.columns(3)
-        for column, title, value in [(a, "Escenario bajo · P10", result["p10"]), (b, "Escenario central", result["end_price"]), (c, "Escenario alto · P90", result["p90"])]:
-            column.metric(title, money(value), pct((value / base_price - 1) * 100))
-        st.caption("P10–P90 es un rango aproximado calculado con errores históricos del modelo; no es una probabilidad garantizada.")
-        if m.get("beats_zero_return_baseline") is False:
-            st.warning("La validación del modelo es débil frente al baseline. La postura de IA se limita a OBSERVAR.")
-        try:
-            recommendation = cached_recommendation(evidence)
-        except Exception as exc:
-            recommendation = None
-            st.warning(f"No se pudo consultar el análisis almacenado: {exc}")
-        if st.button("Generar o actualizar análisis con Gemini", type="primary", disabled=not os.getenv("GEMINI_API_KEY")):
-            try:
-                with st.spinner("Gemini analiza los escenarios…"):
-                    recommendation = generate_recommendation(evidence)
-            except Exception as exc:
-                st.error(f"No se pudo generar el análisis de Gemini: {exc}")
-        if not os.getenv("GEMINI_API_KEY"):
-            st.info("Configura GEMINI_API_KEY en los secretos de Streamlit para activar el análisis de IA.")
         if recommendation:
             answer = recommendation["response"]
-            st.divider()
-            a, b = st.columns([1, 1])
-            a.metric("Postura sugerida", answer["postura"].replace("_", " "))
+            evidence = recommendation["evidence"]
+            generated = pd.to_datetime(recommendation["generated_at"], utc=True)
+            change = float(evidence.get("variation_pct") or 0)
+            direction = "ALCISTA" if change > 2 else "BAJISTA" if change < -2 else "ESTABLE"
+            st.caption(f"Gemini {recommendation.get('model','')} · actualizado {generated:%d/%m/%Y %H:%M UTC} · horizonte de {evidence.get('horizon_days',30)} días")
+            a, b, c = st.columns(3)
+            a.metric("Veredicto de IA", answer["postura"].replace("_", " "))
             b.metric("Riesgo del pronóstico", answer["riesgo"])
+            c.metric("Tendencia prevista", direction)
+            if (pd.Timestamp.now(tz="UTC") - generated).total_seconds() > 8 * 3600:
+                st.warning("El dictamen tiene más de ocho horas. Revisa el último workflow de GitHub Actions.")
+            if not recommendation.get("is_latest"):
+                st.warning("Este dictamen fue generado antes de la actualización automática; la próxima ejecución del workflow lo renovará.")
+            if run and recommendation.get("forecast_run_id") != run.get("forecast_run_id"):
+                st.warning("El dictamen corresponde a una versión anterior del pronóstico; espera el próximo workflow.")
             st.markdown("#### Resumen ejecutivo")
             st.write(answer["resumen"])
+        else:
+            evidence = None
+            st.info("Todavía no existe un dictamen de Gemini para esta moneda. Configura GEMINI_API_KEY en GitHub Actions y ejecuta el workflow de actualización.")
+
+        scenario_base = float(evidence.get("spot_price_usd") or base_price) if evidence else base_price
+        low = float(evidence.get("p10_usd") or result["p10"]) if evidence else result["p10"]
+        central = float(evidence.get("central_price_usd") or result["end_price"]) if evidence else result["end_price"]
+        high = float(evidence.get("p90_usd") or result["p90"]) if evidence else result["p90"]
+        a, b, c = st.columns(3)
+        for column, title, value in [(a, "Escenario bajo · P10", low), (b, "Escenario central", central), (c, "Escenario alto · P90", high)]:
+            column.metric(title, money(value), pct((value / scenario_base - 1) * 100))
+        left, right = st.columns([1.35, 1], gap="large")
+        with left:
+            vals = [(v / scenario_base - 1) * 100 for v in (low, central, high)]
+            fig = figure("Escenarios al cierre del horizonte · cambio vs. precio actual", 360, "%")
+            fig.add_trace(go.Bar(x=["Bajo P10", "Central", "Alto P90"], y=vals, marker_color=[RED, GOLD, GREEN], text=[pct(v) for v in vals], textposition="outside", customdata=[low, central, high], hovertemplate="%{x}<br>%{y:+.1f}%<br>US$ %{customdata:,.4f}<extra></extra>", showlegend=False))
+            fig.add_hline(y=0, line_color="#8c9ab0", line_dash="dot")
+            fig.update_layout(yaxis_title="Cambio respecto al precio actual (%)")
+            st.plotly_chart(fig, width="stretch")
+        with right:
+            news_for_coin = data["news"][data["news"]["mentioned_coin_ids"].apply(lambda ids: coin_id in ids if isinstance(ids, list) else False)]
+            news_week = news_for_coin[news_for_coin.published_at >= pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=7)]
+            sentiment_counts = [(news_week.sentiment_label == x).sum() for x in ("POSITIVO", "NEUTRAL", "NEGATIVO")]
+            fig = figure("Tono de noticias sobre la moneda · 7 días", 360, "Noticias")
+            fig.add_trace(go.Bar(x=["Positivo", "Neutral", "Negativo"], y=sentiment_counts, marker_color=[GREEN, "#8494aa", RED], text=sentiment_counts, textposition="outside", showlegend=False))
+            fig.update_layout(yaxis_title="Noticias detectadas")
+            st.plotly_chart(fig, width="stretch")
+            if news_week.empty:
+                st.caption("No hay menciones directas recientes; el dictamen debe apoyarse principalmente en precios y calidad del modelo.")
+        st.caption("P10–P90 es un rango aproximado del modelo. El sentimiento procede de titulares RSS analizados con VADER; ninguno garantiza el comportamiento futuro.")
+
+        if recommendation:
+            st.markdown("#### Tres escenarios para la decisión")
             left, middle, right = st.columns(3, gap="large")
-            for column, title, key in [(left, "Si cae", "escenario_bajista"), (middle, "Caso central", "escenario_base"), (right, "Si sube", "escenario_alcista")]:
+            for column, title, key in [(left, "Si el mercado cae", "escenario_bajista"), (middle, "Caso central", "escenario_base"), (right, "Si el mercado sube", "escenario_alcista")]:
                 with column:
-                    st.markdown(f"#### {title}")
+                    st.markdown(f"**{title}**")
                     st.write(answer[key])
             st.markdown("#### Señales a vigilar")
-            for signal in answer["senales_a_vigilar"]:
-                st.write("• " + signal)
+            for signal in answer.get("senales_a_vigilar", []):
+                st.write("• " + str(signal))
             st.info(answer["limitaciones"])
-            st.caption(f"Gemini {recommendation['model']} · análisis guardado el {pd.to_datetime(recommendation['generated_at'], utc=True):%d/%m/%Y %H:%M UTC}")
-        with st.expander("Datos utilizados por la IA"):
-            st.json(evidence)
+            with st.expander("Trazabilidad del dictamen"):
+                st.json(evidence)

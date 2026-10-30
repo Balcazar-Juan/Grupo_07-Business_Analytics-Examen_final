@@ -38,16 +38,16 @@ Mobula puede responder HTTP 401/403 según la clave o el plan. En ese caso la ca
 
 ## Interpretación
 
-- **Descriptivo:** pulso de la moneda, evolución de cierres, amplitud del mercado, mayores movimientos, capitalización, ranking y comparación porcentual normalizada.
+- **Descriptivo:** pulso de la moneda, evolución de cierres, amplitud del mercado, mayores movimientos, capitalización, ranking y comparación porcentual normalizada. Incluye noticias RSS recientes de CoinDesk, Cointelegraph y Decrypt, con análisis VADER de titulares y resúmenes. Si no hay mención de la moneda, muestra el tono del mercado general con esa aclaración.
 - **Predictivo:** XGBoost pronostica el retorno logarítmico del día siguiente; la trayectoria se genera recursivamente hasta `FORECAST_DAYS`. La vista individual separa histórico y proyección, muestra un rango P10–P90 al horizonte y una tabla de hitos. La comparación usa cambios porcentuales desde el precio base. Las fechas de menor/mayor cierre proyectado son extremos del escenario central, no oportunidades garantizadas.
-- **Prescriptivo:** Gemini recibe solo cifras de un `forecast_run_id`, métricas de validación y cobertura. Devuelve una postura para evaluar, riesgo, tres escenarios condicionales y señales a vigilar. El resultado estructurado se guarda por huella de evidencia en `ai_recommendations`; una nueva corrida o horizonte produce nueva evidencia. Requiere `GEMINI_API_KEY`. No se llama a Gemini en cada recarga de página.
+- **Prescriptivo:** al terminar cada actualización del workflow, Gemini recibe el pronóstico vigente, el último precio, métricas de validación, cobertura y un agregado de sentimiento de noticias. Devuelve una postura para evaluar, riesgo, tres escenarios condicionales y señales a vigilar. El dictamen se guarda por huella de evidencia en `ai_recommendations` y aparece en el tablero sin pulsar un botón. El tablero añade gráficos de escenarios de precio y tono de noticias. El horizonte automático es de 30 días (`AI_HORIZON_DAYS`) y procesa hasta 20 activos (`AI_MAX_PER_RUN`). No se llama a Gemini al recargar la página. Se necesita `GEMINI_API_KEY` para generar dictámenes nuevos.
 La confiabilidad del modelo aparece en el pronóstico y en la postura de IA cuando XGBoost no supera el baseline de retorno cero. La auditoría técnica detallada permanece disponible mediante `scripts/audit_data.py`.
 
 El horizonte de un año requiere `FORECAST_DAYS=365` y volver a generar pronósticos. Si solo hay 360 días, la interfaz lo advierte.
 
 ## Streamlit Community Cloud
 
-Publica el repositorio en GitHub y crea una aplicación cuyo archivo principal sea `app.py`. En los secretos de la aplicación configura `MONGODB_URI`, `MONGODB_DB_NAME`, `GEMINI_API_KEY` y opcionalmente `GEMINI_MODEL`. La interfaz lee estas claves con `st.secrets`; el workflow de extracción usa secretos de **GitHub Actions** por separado: `MONGODB_URI`, `MONGODB_DB_NAME`, `COINSTATS_API_KEY`, `MOBULA_API_KEY`. Atlas debe permitir conexiones desde los entornos de ejecución elegidos. No se incluyen credenciales en el repositorio.
+Publica el repositorio en GitHub y crea una aplicación cuyo archivo principal sea `app.py`. En los secretos de **Streamlit Community Cloud** configura `MONGODB_URI` y `MONGODB_DB_NAME`; la interfaz solo lee los dictámenes ya guardados. En los secretos de **GitHub Actions** configura `MONGODB_URI`, `MONGODB_DB_NAME`, `COINSTATS_API_KEY` y `GEMINI_API_KEY`; `MOBULA_API_KEY` es opcional. El workflow usa Gemini para producir y guardar los dictámenes. Las claves de GitHub Actions y Streamlit son configuraciones separadas. Atlas debe permitir conexiones desde los entornos de ejecución elegidos. No se incluyen credenciales en el repositorio.
 
 El workflow `.github/workflows/refresh.yml` actualiza mercado cuatro veces al día, historia una vez y modelos semanalmente. También admite ejecución manual. Configura los secretos antes de habilitar las ejecuciones programadas.
 

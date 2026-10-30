@@ -46,10 +46,21 @@ def load_real():
     runs = {
         r["coin_id"]: r
         for r in db.forecast_runs.find({"coin_id": {"$in": ids}, "is_latest": True}, {"_id": 0})
-        if r.get("base_date") and pd.to_datetime(r["base_date"], utc=True) >= pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=3)
+        if r.get("base_date") and pd.to_datetime(r["base_date"], utc=True) >= pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=10)
     }
     run_ids = [r["forecast_run_id"] for r in runs.values()]
     forecasts = _frame(db.forecasts_daily.find({"forecast_run_id": {"$in": run_ids}}, {"_id": 0}), ["coin_id", "forecast_date", "predicted_price", "p10", "p90", "forecast_run_id"])
     forecasts["forecast_date"] = pd.to_datetime(forecasts["forecast_date"], utc=True)
     forecasts = forecasts.sort_values("forecast_date")
-    return {"assets": assets, "history": history, "snapshots": snapshots, "quality": quality, "metrics": metrics, "runs": runs, "forecasts": forecasts}
+    news = _frame(db.news.find(
+        {"published_at": {"$gte": datetime.now(timezone.utc) - timedelta(days=30)}},
+        {"_id": 0, "title": 1, "url": 1, "source": 1, "published_at": 1,
+         "mentioned_coin_ids": 1, "sentiment_compound": 1, "sentiment_label": 1}
+    ).sort("published_at", -1).limit(300), ["title", "url", "source", "published_at", "mentioned_coin_ids", "sentiment_compound", "sentiment_label"])
+    news["published_at"] = pd.to_datetime(news["published_at"], utc=True)
+    news["sentiment_compound"] = pd.to_numeric(news["sentiment_compound"], errors="coerce")
+    recommendations = {}
+    # Include older saved verdicts that predate the is_latest marker. Newest wins.
+    for row in db.ai_recommendations.find({"coin_id": {"$in": ids}}, {"_id": 0}).sort("generated_at", -1):
+        recommendations.setdefault(row["coin_id"], row)
+    return {"assets": assets, "history": history, "snapshots": snapshots, "quality": quality, "metrics": metrics, "runs": runs, "forecasts": forecasts, "news": news, "recommendations": recommendations}

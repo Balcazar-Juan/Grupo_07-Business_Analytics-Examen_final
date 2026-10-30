@@ -30,6 +30,10 @@ jobs:
       MONGODB_DB_NAME: ${{ secrets.MONGODB_DB_NAME }}
       COINSTATS_API_KEY: ${{ secrets.COINSTATS_API_KEY }}
       MOBULA_API_KEY: ${{ secrets.MOBULA_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_MODEL: "gemini-3.5-flash-lite"
+      AI_HORIZON_DAYS: "30"
+      AI_MAX_PER_RUN: "20"
       TOP_N: "20"
       HISTORY_DAYS: "1826"
       FORECAST_DAYS: "365"

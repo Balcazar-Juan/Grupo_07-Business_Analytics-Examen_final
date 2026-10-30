@@ -96,6 +96,7 @@ def ensure_indexes():
     db.pipeline_runs.create_index([("started_at", DESCENDING)])
     db.ai_recommendations.create_index("evidence_hash", unique=True)
     db.ai_recommendations.create_index([("coin_id", ASCENDING), ("generated_at", DESCENDING)])
+    db.ai_recommendations.create_index([("coin_id", ASCENDING), ("is_latest", ASCENDING), ("generated_at", DESCENDING)])
 
     # Capa relacional para Power BI / Atlas SQL
     db.dim_assets.create_index("coin_id", unique=True)
