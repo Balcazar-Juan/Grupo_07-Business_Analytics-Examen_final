@@ -45,6 +45,7 @@ def get_client():
     return _client
 
 def get_db():
+    require("mongodb_db_name")
     return get_client()[settings.mongodb_db_name]
 
 def ping():

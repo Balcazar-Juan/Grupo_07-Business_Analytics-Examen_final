@@ -18,7 +18,7 @@ def env_float(name: str, default: float) -> float:
 @dataclass(frozen=True)
 class Settings:
     mongodb_uri: str = os.getenv("MONGODB_URI", "")
-    mongodb_db_name: str = os.getenv("MONGODB_DB_NAME", "crypto_analytics")
+    mongodb_db_name: str = os.getenv("MONGODB_DB_NAME", "")
     coinstats_api_key: str = os.getenv("COINSTATS_API_KEY", "")
     mobula_api_key: str = os.getenv("MOBULA_API_KEY", "")
 
@@ -46,6 +46,7 @@ settings = Settings()
 def require(*attrs: str) -> None:
     names = {
         "mongodb_uri": "MONGODB_URI",
+        "mongodb_db_name": "MONGODB_DB_NAME",
         "coinstats_api_key": "COINSTATS_API_KEY",
         "mobula_api_key": "MOBULA_API_KEY",
     }

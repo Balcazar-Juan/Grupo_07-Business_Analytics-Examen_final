@@ -13,6 +13,8 @@ Copy-Item .env.example .env
 
 Completa `.env` con tus claves y URI de Atlas. No publiques `.env`. El nombre de base configurado en este proyecto es `crypto_analytics_powerbi`; puedes cambiarlo con `MONGODB_DB_NAME`. Para la primera carga:
 
+`MONGODB_DB_NAME` es obligatorio: si falta, el proceso se detiene antes de escribir para evitar crear otra base por accidente.
+
 ```powershell
 python scripts/bootstrap.py
 python scripts/audit_data.py
