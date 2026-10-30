@@ -1,0 +1,13 @@
+pymongo[srv]>=4.8,<5
+python-dotenv>=1.0,<2
+requests>=2.32,<3
+pandas>=2.2,<3
+numpy>=1.26,<3
+feedparser>=6.0,<7
+beautifulsoup4>=4.12,<5
+nltk>=3.9,<4
+xgboost>=2.1,<4
+scikit-learn>=1.5,<2
+streamlit>=1.66,<2
+plotly>=6,<7
+google-genai>=1.0,<2

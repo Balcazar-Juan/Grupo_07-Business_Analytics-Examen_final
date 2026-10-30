@@ -1,0 +1,37 @@
+crypto_analytics_pmv/
+├── .github/workflows/refresh.yml
+├── .env.example
+├── .gitignore
+├── app.py
+├── README.md
+├── requirements.txt
+├── scripts/
+│   ├── bootstrap.py
+│   ├── audit_data.py
+│   ├── inspect_pipeline.py
+│   ├── publish_powerbi.py
+│   ├── refresh.py
+│   ├── test_connection.py
+│   └── train_models.py
+└── src/
+    ├── api_clients/
+    │   ├── binance.py
+    │   ├── coinstats.py
+    │   └── mobula.py
+    ├── etl/
+    │   ├── history.py
+    │   ├── market.py
+    │   ├── news.py
+    │   └── powerbi.py
+    ├── dashboard/
+    │   ├── data.py
+    │   ├── logic.py
+    │   └── ai.py
+    ├── ml/
+    │   ├── features.py
+    │   └── model.py
+    ├── nlp/
+    │   └── sentiment.py
+    ├── config.py
+    ├── db.py
+    └── http_client.py
