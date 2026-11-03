@@ -25,8 +25,8 @@ class Settings:
     top_n: int = env_int("TOP_N", 20)
     # 5 anios aprox. Se puede cambiar sin tocar codigo.
     history_days: int = env_int("HISTORY_DAYS", 1826)
-    # Horizonte futuro configurable. Por ahora: 360 dias.
-    forecast_days: int = env_int("FORECAST_DAYS", 365)
+    # Horizonte futuro configurable: dos años para la vista de escenarios.
+    forecast_days: int = env_int("FORECAST_DAYS", 730)
     model_min_rows: int = env_int("MODEL_MIN_ROWS", 365)
     forecast_return_clip: float = env_float("FORECAST_RETURN_CLIP", 0.25)
 

@@ -288,7 +288,7 @@ with predictive:
                 m3.metric("MAPE precio", pct(metric.get("mape_price_pct")))
                 m4.metric("MAE precio", money(metric.get("mae_price_usd")))
             st.markdown("#### Hitos de la proyección")
-            milestones = [v for v in [15, 30, 60, 90, 180, 270, 365] if v <= len(future) and v <= horizon]
+            milestones = [v for v in [15, 30, 60, 90, 180, 270, 365, 540, 730] if v <= len(future) and v <= horizon]
             rows = []
             for day in milestones:
                 row = future.iloc[day - 1]

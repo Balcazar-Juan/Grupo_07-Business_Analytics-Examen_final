@@ -14,7 +14,7 @@ from src.db import get_db
 from src.ml.features import FEATURES, build
 
 STABLE = {"USDT", "USDC", "DAI", "FDUSD", "USDE", "USDS", "PYUSD", "TUSD", "FRAX"}
-DIRECT_HORIZONS = (1, 7, 15, 30, 90, 180, 365)
+DIRECT_HORIZONS = (1, 7, 15, 30, 90, 180, 365, 540, 730)
 
 
 def is_stable(asset):

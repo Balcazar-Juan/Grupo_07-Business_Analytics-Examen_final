@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 
-HORIZONS = {"15 días": 15, "1 mes": 30, "2 meses": 60, "3 meses": 90, "6 meses": 180, "9 meses": 270, "1 año": 365}
+HORIZONS = {"15 días": 15, "1 mes": 30, "2 meses": 60, "3 meses": 90, "6 meses": 180, "9 meses": 270, "1 año": 365, "18 meses": 540, "2 años": 730}
 
 
 def money(value):

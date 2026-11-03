@@ -36,7 +36,7 @@ jobs:
       AI_MAX_PER_RUN: "20"
       TOP_N: "20"
       HISTORY_DAYS: "1826"
-      FORECAST_DAYS: "365"
+      FORECAST_DAYS: "730"
       MODEL_MIN_ROWS: "365"
       INCREMENTAL_HISTORY_DAYS: "14"
 
