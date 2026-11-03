@@ -86,6 +86,7 @@ def ensure_indexes():
 
     # ML
     db.models.create_index("coin_id", unique=True)
+    db.models_direct.create_index([("coin_id", ASCENDING), ("horizon_days", ASCENDING)], unique=True)
     db.model_metrics.create_index([("coin_id", ASCENDING), ("trained_at", DESCENDING)])
     db.forecast_runs.create_index("forecast_run_id", unique=True)
     db.forecasts_daily.create_index(

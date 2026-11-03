@@ -14,6 +14,7 @@ from src.db import get_db
 from src.ml.features import FEATURES, build
 
 STABLE = {"USDT", "USDC", "DAI", "FDUSD", "USDE", "USDS", "PYUSD", "TUSD", "FRAX"}
+DIRECT_HORIZONS = (1, 7, 15, 30, 90, 180, 365)
 
 
 def is_stable(asset):
@@ -157,6 +158,50 @@ def _evaluate_walk_forward(feat: pd.DataFrame, params=None):
     }
 
 
+def _train_direct_models(db, coin_id, asset, prices, selected_params, source, trained_at):
+    """Entrena un modelo independiente para cada horizonte y evita deriva recursiva."""
+    base = build(prices, target=False)
+    direct_metrics = {}
+    for horizon in DIRECT_HORIZONS:
+        frame = base.copy()
+        target_col = f"target_log_return_{horizon}d"
+        frame[target_col] = np.log(frame["close"].shift(-horizon) / frame["close"])
+        frame = frame.replace([np.inf, -np.inf], np.nan).dropna(subset=FEATURES + [target_col])
+        if len(frame) < settings.model_min_rows:
+            continue
+        split = max(int(len(frame) * 0.8), len(frame) - 180)
+        split = min(max(split, 1), len(frame) - 1)
+        train, valid = frame.iloc[:split], frame.iloc[split:]
+        model = _new_model(selected_params)
+        model.fit(train[FEATURES], train[target_col], verbose=False)
+        pred = model.predict(valid[FEATURES])
+        actual = valid[target_col].to_numpy()
+        current = valid["close"].to_numpy(dtype=float)
+        actual_price = current * np.exp(actual)
+        pred_price = current * np.exp(pred)
+        residual_std = float(np.std(actual - pred, ddof=1)) if len(actual) > 1 else 0.0
+        raw = bytes(model.get_booster().save_raw(raw_format="json"))
+        q01, q99 = np.quantile(frame[target_col], [0.01, 0.99])
+        db.models_direct.update_one(
+            {"coin_id": coin_id, "horizon_days": horizon},
+            {"$set": {
+                "coin_id": coin_id, "symbol": asset.get("symbol"), "horizon_days": horizon,
+                "model_raw_json": Binary(raw), "feature_columns": FEATURES,
+                "model_type": "XGBRegressorDirect", "trained_at": trained_at,
+                "model_version": trained_at.strftime("%Y%m%dT%H%M%SZ"),
+                "history_source": source, "training_rows": int(len(frame)),
+                "residual_std": residual_std,
+                "return_clip_low": max(float(q01), -abs(settings.forecast_return_clip)),
+                "return_clip_high": min(float(q99), abs(settings.forecast_return_clip)),
+                "mae_price_usd": float(mean_absolute_error(actual_price, pred_price)),
+                "rmse_price_usd": float(np.sqrt(mean_squared_error(actual_price, pred_price))),
+                "mape_price_pct": float(np.mean(np.abs((actual_price - pred_price) / actual_price)) * 100),
+            }}, upsert=True,
+        )
+        direct_metrics[str(horizon)] = {"rows": int(len(frame)), "rmse_price_usd": float(np.sqrt(mean_squared_error(actual_price, pred_price)))}
+    return direct_metrics
+
+
 def train_one(coin_id):
     db = get_db()
     asset = db.assets.find_one({"coin_id": coin_id}) or {}
@@ -228,6 +273,8 @@ def train_one(coin_id):
         "return_clip_high": clip_high,
     }}, upsert=True)
     db.model_metrics.insert_one(metrics)
+    direct_metrics = _train_direct_models(db, coin_id, asset, prices, selected_params, source, trained_at)
+    db.model_metrics.update_one({"_id": db.model_metrics.find_one({"coin_id": coin_id, "trained_at": trained_at}, {"_id": 1})["_id"]}, {"$set": {"direct_horizon_metrics": direct_metrics}})
     return {"status": "trained", **metrics}
 
 
@@ -241,6 +288,48 @@ def _load_booster(model_doc):
     booster = Booster()
     booster.load_model(bytearray(model_doc["model_raw_json"]))
     return booster
+
+
+def _direct_forecast_docs(db, coin_id, asset, prices, source, days, model_version, generated_at, run_id):
+    direct = list(db.models_direct.find({"coin_id": coin_id}, {"_id": 0}).sort("horizon_days", 1))
+    direct = [x for x in direct if int(x.get("horizon_days", 0)) <= days]
+    if not direct:
+        return []
+    feat = build(prices, target=False)
+    if feat.empty:
+        return []
+    X = pd.DataFrame([feat.iloc[-1][FEATURES].to_dict()])[FEATURES]
+    base_price = float(prices.iloc[-1]["close"])
+    last_date = pd.Timestamp(prices.iloc[-1]["date"])
+    anchors = [(0, math.log(base_price), 0.0)]
+    for doc in direct:
+        booster = _load_booster(doc)
+        pred_return = float(booster.predict(DMatrix(X, feature_names=FEATURES))[0])
+        pred_return = float(np.clip(pred_return, doc.get("return_clip_low", -0.25), doc.get("return_clip_high", 0.25)))
+        uncertainty = 1.2815515655446004 * float(doc.get("residual_std") or 0.0)
+        anchors.append((int(doc["horizon_days"]), math.log(base_price) + pred_return, uncertainty))
+    anchors.sort(key=lambda x: x[0])
+    hs = np.array([x[0] for x in anchors], dtype=float)
+    logs = np.array([x[1] for x in anchors], dtype=float)
+    errs = np.array([x[2] for x in anchors], dtype=float)
+    docs = []
+    previous = base_price
+    for day in range(1, days + 1):
+        log_price = float(np.interp(day, hs, logs))
+        uncertainty = float(np.interp(day, hs, errs))
+        price = math.exp(log_price)
+        lower = math.exp(log_price - uncertainty)
+        upper = math.exp(log_price + uncertainty)
+        forecast_date = last_date + pd.Timedelta(days=day)
+        docs.append({
+            "forecast_run_id": run_id, "coin_id": coin_id, "symbol": asset.get("symbol"),
+            "generated_at": generated_at, "forecast_date": forecast_date.to_pydatetime(),
+            "horizon_day": day, "predicted_price": price, "p10": lower, "p50": price, "p90": upper,
+            "predicted_log_return": math.log(price / previous), "model": "XGBoostDirectHorizons",
+            "model_version": model_version, "history_source": source, "is_latest": True,
+        })
+        previous = price
+    return docs
 
 
 def forecast_one(coin_id: str, days: int | None = None):
@@ -268,6 +357,27 @@ def forecast_one(coin_id: str, days: int | None = None):
     model_version = model_doc.get("model_version") or generated_at.strftime("%Y%m%dT%H%M%SZ")
     run_key = f"{coin_id}|{model_version}|{generated_at.isoformat()}|{days}"
     run_id = hashlib.sha256(run_key.encode()).hexdigest()[:24]
+
+    direct_docs = _direct_forecast_docs(db, coin_id, asset, prices, source, days, model_version, generated_at, run_id)
+    if direct_docs:
+        db.forecasts_daily.update_many({"coin_id": coin_id, "is_latest": True}, {"$set": {"is_latest": False}})
+        db.forecast_runs.update_many({"coin_id": coin_id, "is_latest": True}, {"$set": {"is_latest": False}})
+        db.forecasts_daily.bulk_write([
+            UpdateOne({"forecast_run_id": run_id, "coin_id": coin_id, "forecast_date": doc["forecast_date"]}, {"$set": doc}, upsert=True)
+            for doc in direct_docs
+        ], ordered=False)
+        db.forecast_runs.update_one({"forecast_run_id": run_id}, {"$set": {
+            "forecast_run_id": run_id, "coin_id": coin_id, "symbol": asset.get("symbol"),
+            "generated_at": generated_at, "forecast_days": days,
+            "forecast_start": (pd.Timestamp(prices.iloc[-1]["date"]) + pd.Timedelta(days=1)).to_pydatetime(),
+            "forecast_end": (pd.Timestamp(prices.iloc[-1]["date"]) + pd.Timedelta(days=days)).to_pydatetime(),
+            "base_date": pd.Timestamp(prices.iloc[-1]["date"]).to_pydatetime(),
+            "base_price": float(prices.iloc[-1]["close"]), "model_version": model_version,
+            "interval": "direct_horizon_models_interpolated_p10_p90", "is_latest": True,
+        }}, upsert=True)
+        return {"coin_id": coin_id, "status": "forecasted", "forecast_run_id": run_id, "days": days,
+                "base_price": float(prices.iloc[-1]["close"]), "final_predicted_price": direct_docs[-1]["predicted_price"],
+                "forecast_method": "direct_horizons"}
 
     residual_std = float(model_doc.get("residual_std") or 0.0)
     clip_low = float(model_doc.get("return_clip_low", -abs(settings.forecast_return_clip)))

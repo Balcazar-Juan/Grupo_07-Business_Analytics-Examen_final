@@ -73,6 +73,11 @@ def price_chart(history, forecast, base_date, asset_symbol):
     if not recent.empty:
         fig.add_trace(go.Scatter(x=recent.date, y=recent.close, name="Histórico", mode="lines", line=dict(color=CYAN, width=2.6), hovertemplate="%{x|%d %b %Y}<br>US$ %{y:,.4f}<extra>Histórico</extra>"))
     if not forecast.empty:
+        if {"p10", "p90"}.issubset(forecast.columns):
+            forecast_band_x = [base_date, *forecast.forecast_date]
+            forecast_base = float(recent.iloc[-1].close) if not recent.empty else float(forecast.iloc[0].predicted_price)
+            fig.add_trace(go.Scatter(x=forecast_band_x, y=[forecast_base, *forecast.p90], mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"))
+            fig.add_trace(go.Scatter(x=forecast_band_x, y=[forecast_base, *forecast.p10], mode="lines", line=dict(width=0), fill="tonexty", fillcolor="rgba(246,198,94,.14)", name="Rango P10–P90", hovertemplate="P10–P90<extra></extra>"))
         fig.add_trace(go.Scatter(x=[base_date, *forecast.forecast_date], y=[float(recent.iloc[-1].close) if not recent.empty else float(forecast.iloc[0].predicted_price), *forecast.predicted_price], name="Proyección central", mode="lines", line=dict(color=GOLD, width=2.8), hovertemplate="%{x|%d %b %Y}<br>US$ %{y:,.4f}<extra>Proyección</extra>"))
         fig.add_vline(x=pd.Timestamp(base_date).timestamp() * 1000, line_dash="dot", line_color="#99a7bc", annotation_text="Inicio del pronóstico", annotation_position="top right")
     return fig
