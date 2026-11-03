@@ -5,11 +5,11 @@ import pandas as pd
 # Variables tecnicas pensadas para poder proyectar recursivamente sin requerir
 # datos futuros de noticias ni valores absolutos fuera del rango historico.
 FEATURES = [
-    "return_1d", "return_3d", "return_7d", "return_14d",
-    "ma_ratio_7", "ma_ratio_14", "ma_ratio_30",
-    "ema_ratio_7", "ema_ratio_21",
-    "volatility_7", "volatility_14", "volatility_30",
-    "momentum_7", "momentum_14", "rsi_14",
+    "return_1d", "return_3d", "return_7d", "return_14d", "return_30d", "return_60d", "return_90d",
+    "ma_ratio_7", "ma_ratio_14", "ma_ratio_30", "ma_ratio_60", "ma_ratio_90",
+    "ema_ratio_7", "ema_ratio_21", "ema_ratio_50", "ema_ratio_100",
+    "volatility_7", "volatility_14", "volatility_30", "volatility_60", "volatility_90",
+    "momentum_7", "momentum_14", "momentum_30", "momentum_90", "rsi_7", "rsi_14", "rsi_30",
     "lag_return_1", "lag_return_2", "lag_return_3", "lag_return_7",
     "volume_change_1d", "volume_z_30",
 ]
@@ -38,24 +38,26 @@ def build(prices: pd.DataFrame, target: bool = True) -> pd.DataFrame:
     df = df.set_index("date").asfreq("D").reset_index()
 
     ret1 = df["close"].pct_change(fill_method=None)
-    for n in (1, 3, 7, 14):
+    for n in (1, 3, 7, 14, 30, 60, 90):
         df[f"return_{n}d"] = df["close"].pct_change(n, fill_method=None)
 
-    for n in (7, 14, 30):
+    for n in (7, 14, 30, 60, 90):
         ma = df["close"].rolling(n).mean()
         df[f"ma_ratio_{n}"] = df["close"] / ma - 1
 
-    ema7 = df["close"].ewm(span=7, adjust=False).mean()
-    ema21 = df["close"].ewm(span=21, adjust=False).mean()
-    df["ema_ratio_7"] = df["close"] / ema7 - 1
-    df["ema_ratio_21"] = df["close"] / ema21 - 1
+    for n in (7, 21, 50, 100):
+        ema = df["close"].ewm(span=n, adjust=False).mean()
+        df[f"ema_ratio_{n}"] = df["close"] / ema - 1
 
-    for n in (7, 14, 30):
+    for n in (7, 14, 30, 60, 90):
         df[f"volatility_{n}"] = ret1.rolling(n).std()
 
     df["momentum_7"] = df["close"] / df["close"].shift(7) - 1
     df["momentum_14"] = df["close"] / df["close"].shift(14) - 1
-    df["rsi_14"] = rsi(df["close"])
+    df["momentum_30"] = df["close"] / df["close"].shift(30) - 1
+    df["momentum_90"] = df["close"] / df["close"].shift(90) - 1
+    for n in (7, 14, 30):
+        df[f"rsi_{n}"] = rsi(df["close"], n)
 
     for n in (1, 2, 3, 7):
         df[f"lag_return_{n}"] = ret1.shift(n)

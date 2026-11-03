@@ -55,22 +55,44 @@ def persist_features(coin_id: str, feat: pd.DataFrame):
     return len(ops)
 
 
-def _new_model():
+DEFAULT_PARAMS = {
+        "n_estimators": 900, "max_depth": 3, "learning_rate": 0.03,
+        "min_child_weight": 5, "subsample": 0.85, "colsample_bytree": 0.85,
+        "reg_lambda": 4.0, "reg_alpha": 0.10, "gamma": 0.05,
+}
+
+
+def _new_model(params=None):
+    config = {**DEFAULT_PARAMS, **(params or {})}
     return XGBRegressor(
         objective="reg:squarederror",
-        n_estimators=650,
-        max_depth=4,
-        learning_rate=0.025,
-        subsample=0.85,
-        colsample_bytree=0.85,
-        reg_lambda=1.5,
-        reg_alpha=0.05,
+        **config,
         random_state=42,
         n_jobs=2,
     )
 
 
-def _evaluate_walk_forward(feat: pd.DataFrame):
+def _select_params(feat: pd.DataFrame):
+    """Selecciona hiperparámetros en un corte temporal, sin mirar el futuro."""
+    if len(feat) < 600:
+        return dict(DEFAULT_PARAMS)
+    split = int(len(feat) * 0.8)
+    train, valid = feat.iloc[:split], feat.iloc[split:]
+    candidates = [
+        DEFAULT_PARAMS,
+        {**DEFAULT_PARAMS, "max_depth": 2, "min_child_weight": 8, "reg_lambda": 8.0},
+        {**DEFAULT_PARAMS, "max_depth": 4, "min_child_weight": 3, "learning_rate": 0.02, "n_estimators": 1200},
+    ]
+    scores = []
+    for params in candidates:
+        model = _new_model(params)
+        model.fit(train[FEATURES], train["target_log_return_next"], verbose=False)
+        pred = model.predict(valid[FEATURES])
+        scores.append((mean_absolute_error(valid["target_log_return_next"], pred), params))
+    return dict(min(scores, key=lambda item: item[0])[1])
+
+
+def _evaluate_walk_forward(feat: pd.DataFrame, params=None):
     # Hasta 4 folds; en series cortas usa 3. Nunca mezcla futuro en entrenamiento.
     n_splits = 4 if len(feat) >= 800 else 3
     # El target de la última fila de train usa el cierre del primer día de test.
@@ -84,7 +106,7 @@ def _evaluate_walk_forward(feat: pd.DataFrame):
     for fold, (train_idx, test_idx) in enumerate(splitter.split(feat), start=1):
         train = feat.iloc[train_idx]
         test = feat.iloc[test_idx]
-        model = _new_model()
+        model = _new_model(params)
         model.fit(train[FEATURES], train["target_log_return_next"])
         pred = model.predict(test[FEATURES])
         actual = test["target_log_return_next"].to_numpy()
@@ -151,9 +173,10 @@ def train_one(coin_id):
         return {"coin_id": coin_id, "status": "insufficient_history", "rows": len(feat)}
 
     persist_features(coin_id, feat)
-    evaluation = _evaluate_walk_forward(feat)
+    selected_params = _select_params(feat)
+    evaluation = _evaluate_walk_forward(feat, selected_params)
 
-    model = _new_model()
+    model = _new_model(selected_params)
     model.fit(feat[FEATURES], feat["target_log_return_next"])
     trained_at = datetime.now(timezone.utc)
 
@@ -179,6 +202,7 @@ def train_one(coin_id):
         "training_end": pd.Timestamp(feat.iloc[-1]["date"]).to_pydatetime(),
         "training_rows": int(len(feat)),
         "target": "next_day_log_return",
+        "hyperparameters": selected_params,
         **evaluation,
         "feature_importance": feature_importance,
         "forecast_return_clip_low": clip_low,
@@ -198,6 +222,7 @@ def train_one(coin_id):
         "training_start": pd.Timestamp(feat.iloc[0]["date"]).to_pydatetime(),
         "training_end": pd.Timestamp(feat.iloc[-1]["date"]).to_pydatetime(),
         "model_version": model_version,
+        "hyperparameters": selected_params,
         "residual_std": evaluation["residual_std"],
         "return_clip_low": clip_low,
         "return_clip_high": clip_high,
