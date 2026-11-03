@@ -79,6 +79,7 @@ def _evaluate_walk_forward(feat: pd.DataFrame):
     rows = []
     residuals = []
     actual_all, pred_all = [], []
+    actual_price_all, pred_price_all = [], []
 
     for fold, (train_idx, test_idx) in enumerate(splitter.split(feat), start=1):
         train = feat.iloc[train_idx]
@@ -87,10 +88,15 @@ def _evaluate_walk_forward(feat: pd.DataFrame):
         model.fit(train[FEATURES], train["target_log_return_next"])
         pred = model.predict(test[FEATURES])
         actual = test["target_log_return_next"].to_numpy()
+        current_prices = test["close"].to_numpy(dtype=float)
+        actual_price = current_prices * np.exp(actual)
+        pred_price = current_prices * np.exp(pred)
         residual = actual - pred
         residuals.extend(residual.tolist())
         actual_all.extend(actual.tolist())
         pred_all.extend(pred.tolist())
+        actual_price_all.extend(actual_price.tolist())
+        pred_price_all.extend(pred_price.tolist())
 
         rows.append({
             "fold": fold,
@@ -102,16 +108,26 @@ def _evaluate_walk_forward(feat: pd.DataFrame):
             "test_rows": int(len(test)),
             "mae_log_return": float(mean_absolute_error(actual, pred)),
             "rmse_log_return": float(np.sqrt(mean_squared_error(actual, pred))),
+            "mae_price_usd": float(mean_absolute_error(actual_price, pred_price)),
+            "mse_price_usd": float(mean_squared_error(actual_price, pred_price)),
+            "rmse_price_usd": float(np.sqrt(mean_squared_error(actual_price, pred_price))),
+            "mape_price_pct": float(np.mean(np.abs((actual_price - pred_price) / actual_price)) * 100),
             "direction_accuracy_pct": float((np.sign(actual) == np.sign(pred)).mean() * 100),
         })
 
     actual_all = np.asarray(actual_all)
     pred_all = np.asarray(pred_all)
+    actual_price_all = np.asarray(actual_price_all)
+    pred_price_all = np.asarray(pred_price_all)
     baseline = np.zeros_like(actual_all)
     return {
         "folds": rows,
         "mae_log_return": float(mean_absolute_error(actual_all, pred_all)),
         "rmse_log_return": float(np.sqrt(mean_squared_error(actual_all, pred_all))),
+        "mae_price_usd": float(mean_absolute_error(actual_price_all, pred_price_all)),
+        "mse_price_usd": float(mean_squared_error(actual_price_all, pred_price_all)),
+        "rmse_price_usd": float(np.sqrt(mean_squared_error(actual_price_all, pred_price_all))),
+        "mape_price_pct": float(np.mean(np.abs((actual_price_all - pred_price_all) / actual_price_all)) * 100),
         "direction_accuracy_pct": float((np.sign(actual_all) == np.sign(pred_all)).mean() * 100),
         "baseline_mae_log_return": float(mean_absolute_error(actual_all, baseline)),
         "beats_zero_return_baseline": bool(mean_absolute_error(actual_all, pred_all) < mean_absolute_error(actual_all, baseline)),
