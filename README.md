@@ -43,7 +43,7 @@ Mobula puede responder HTTP 401/403 según la clave o el plan. En ese caso la ca
 - **Prescriptivo:** al terminar cada actualización del workflow, Gemini recibe el pronóstico vigente, el último precio, métricas de validación, cobertura y un agregado de sentimiento de noticias. Devuelve una postura para evaluar, riesgo, tres escenarios condicionales y señales a vigilar. El dictamen se guarda por huella de evidencia en `ai_recommendations` y aparece en el tablero sin pulsar un botón. El tablero añade gráficos de escenarios de precio y tono de noticias. El horizonte automático es de 30 días (`AI_HORIZON_DAYS`) y procesa hasta 20 activos (`AI_MAX_PER_RUN`). No se llama a Gemini al recargar la página. Se necesita `GEMINI_API_KEY` para generar dictámenes nuevos.
 La confiabilidad del modelo aparece en el pronóstico y en la postura de IA cuando XGBoost no supera el baseline de retorno cero. La auditoría técnica detallada permanece disponible mediante `scripts/audit_data.py`.
 
-El horizonte de dos años usa `FORECAST_DAYS=730` y requiere volver a generar pronósticos. La interfaz advierte si la cobertura disponible es menor al horizonte seleccionado. Los puntos de 540 y 730 días son escenarios de largo plazo y tienen mucha más incertidumbre que los horizontes cortos.
+El horizonte de dos años usa `FORECAST_DAYS=730` y requiere volver a generar pronósticos. La interfaz advierte si la cobertura disponible es menor al horizonte seleccionado. Los puntos de 540 y 730 días son escenarios de largo plazo y tienen mucha más incertidumbre que los horizontes cortos. Las métricas del panel se normalizan respecto al precio real: RMSE, MAE y MAPE se expresan en porcentaje; MSE se expresa en puntos porcentuales cuadrados.
 
 ## Streamlit Community Cloud
 

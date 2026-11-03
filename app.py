@@ -283,10 +283,10 @@ with predictive:
             with st.expander("Métricas de validación del modelo"):
                 st.caption("Calculadas con validación walk-forward sobre precios históricos; MAPE está expresado como porcentaje del precio real.")
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric("RMSE precio", money(metric.get("rmse_price_usd")))
-                m2.metric("MSE precio", money(metric.get("mse_price_usd")))
-                m3.metric("MAPE precio", pct(metric.get("mape_price_pct")))
-                m4.metric("MAE precio", money(metric.get("mae_price_usd")))
+                m1.metric("RMSE relativo", pct(metric.get("rmse_price_pct")))
+                m2.metric("MSE relativo", f"{float(metric.get('mse_price_pct2')):,.2f} %²" if metric.get("mse_price_pct2") is not None else "Sin dato")
+                m3.metric("MAPE", pct(metric.get("mape_price_pct")))
+                m4.metric("MAE relativo", pct(metric.get("mae_price_pct")))
             st.markdown("#### Hitos de la proyección")
             milestones = [v for v in [15, 30, 60, 90, 180, 270, 365, 540, 730] if v <= len(future) and v <= horizon]
             rows = []

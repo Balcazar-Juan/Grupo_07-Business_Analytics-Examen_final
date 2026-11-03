@@ -14,7 +14,8 @@ from src.db import get_db
 from src.ml.features import FEATURES, build
 
 STABLE = {"USDT", "USDC", "DAI", "FDUSD", "USDE", "USDS", "PYUSD", "TUSD", "FRAX"}
-DIRECT_HORIZONS = (1, 7, 15, 30, 90, 180, 365, 540, 730)
+# Más anclas directas reducen los tramos artificialmente rectos del horizonte largo.
+DIRECT_HORIZONS = (1, 7, 15, 30, 45, 60, 90, 120, 150, 180, 240, 300, 365, 450, 540, 600, 660, 730)
 
 
 def is_stable(asset):
@@ -114,6 +115,7 @@ def _evaluate_walk_forward(feat: pd.DataFrame, params=None):
         current_prices = test["close"].to_numpy(dtype=float)
         actual_price = current_prices * np.exp(actual)
         pred_price = current_prices * np.exp(pred)
+        relative_error = (actual_price - pred_price) / actual_price
         residual = actual - pred
         residuals.extend(residual.tolist())
         actual_all.extend(actual.tolist())
@@ -135,6 +137,9 @@ def _evaluate_walk_forward(feat: pd.DataFrame, params=None):
             "mse_price_usd": float(mean_squared_error(actual_price, pred_price)),
             "rmse_price_usd": float(np.sqrt(mean_squared_error(actual_price, pred_price))),
             "mape_price_pct": float(np.mean(np.abs((actual_price - pred_price) / actual_price)) * 100),
+            "mae_price_pct": float(np.mean(np.abs(relative_error)) * 100),
+            "mse_price_pct2": float(np.mean(relative_error ** 2) * 10000),
+            "rmse_price_pct": float(np.sqrt(np.mean(relative_error ** 2)) * 100),
             "direction_accuracy_pct": float((np.sign(actual) == np.sign(pred)).mean() * 100),
         })
 
@@ -142,6 +147,7 @@ def _evaluate_walk_forward(feat: pd.DataFrame, params=None):
     pred_all = np.asarray(pred_all)
     actual_price_all = np.asarray(actual_price_all)
     pred_price_all = np.asarray(pred_price_all)
+    relative_error_all = (actual_price_all - pred_price_all) / actual_price_all
     baseline = np.zeros_like(actual_all)
     return {
         "folds": rows,
@@ -151,6 +157,9 @@ def _evaluate_walk_forward(feat: pd.DataFrame, params=None):
         "mse_price_usd": float(mean_squared_error(actual_price_all, pred_price_all)),
         "rmse_price_usd": float(np.sqrt(mean_squared_error(actual_price_all, pred_price_all))),
         "mape_price_pct": float(np.mean(np.abs((actual_price_all - pred_price_all) / actual_price_all)) * 100),
+        "mae_price_pct": float(np.mean(np.abs(relative_error_all)) * 100),
+        "mse_price_pct2": float(np.mean(relative_error_all ** 2) * 10000),
+        "rmse_price_pct": float(np.sqrt(np.mean(relative_error_all ** 2)) * 100),
         "direction_accuracy_pct": float((np.sign(actual_all) == np.sign(pred_all)).mean() * 100),
         "baseline_mae_log_return": float(mean_absolute_error(actual_all, baseline)),
         "beats_zero_return_baseline": bool(mean_absolute_error(actual_all, pred_all) < mean_absolute_error(actual_all, baseline)),
