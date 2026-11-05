@@ -100,6 +100,13 @@ except Exception as exc:
     st.stop()
 
 assets = data["assets"]
+
+ignored_global_symbols = {"USDC", "USDT", "STETH", "XMR", "WSTETH", "USDS", "BSC-USD", "WBT"}
+assets = [
+    a for a in assets 
+    if a.get("symbol") not in ignored_global_symbols 
+    and a["coin_id"] not in {"usdc", "usdt", "steth", "xmr", "wsteth", "usds", "bsc-usd", "wbt"}
+]
 labels = {f"{a.get('symbol','?')} · {a.get('name',a['coin_id'])}": a["coin_id"] for a in assets}
 selected = st.sidebar.selectbox("Moneda de análisis", list(labels))
 coin_id = labels[selected]
@@ -243,164 +250,288 @@ with descriptive:
         "Volumen 24 h USD": st.column_config.NumberColumn("Volumen 24 h USD", format="$%.0f"),
     })
 
+
 with predictive:
     st.subheader("Pronóstico de precios")
-    st.markdown('<div class="lead">Selecciona el horizonte y lee la trayectoria junto al último histórico. El rango final resume la incertidumbre.</div>', unsafe_allow_html=True)
-    horizon_label = st.select_slider("Horizonte del análisis", options=list(HORIZONS), value="3 meses")
-    horizon = HORIZONS[horizon_label]
+    st.markdown('<div class="lead">Selecciona el horizonte y lee la trayectoria proyectada junto al último precio real del mercado.</div>', unsafe_allow_html=True)
+    st.info("**Aviso académico:** Las estimaciones mostradas provienen de modelos de Machine Learning (XGBoost) con fines puramente analíticos y educativos. Deben tomarse con precaución y no constituyen asesoría financiera.", icon="ℹ️")
+    
+    horizon_label = st.select_slider("Horizonte del análisis (Máximo 1 año)", options=["30 días", "90 días", "180 días", "1 año"], value="90 días")
+    HORIZONS_MAP = {"30 días": 30, "90 días": 90, "180 días": 180, "1 año": 365}
+    horizon = HORIZONS_MAP[horizon_label]
+    
     individual, comparison_tab = st.tabs(["Una moneda", "Comparar monedas"])
     forecasts = data["forecasts"]
+    
     with individual:
         run = data["runs"].get(coin_id)
         future = forecasts[forecasts.coin_id == coin_id].sort_values("forecast_date").head(horizon)
         result = forecast_stats(future, float((run or {}).get("base_price") or 0), horizon)
+        
         if not run or not result:
             st.info("Esta moneda aún no tiene un pronóstico vigente. Selecciona otra moneda con histórico suficiente.")
         else:
-            base_price = float(run["base_price"])
+            hist_coin = data["history"][data["history"].coin_id == coin_id]
+            base_price = float(hist_coin["close"].iloc[-1]) if not hist_coin.empty else float(run["base_price"])
             base_date = pd.to_datetime(run["base_date"], utc=True)
             metric = data["metrics"].get(coin_id, {})
-            if metric.get("beats_zero_return_baseline") is False:
-                st.warning("Confiabilidad limitada: XGBoost no mejoró el pronóstico simple de precio sin cambio en su validación. Usa los escenarios como exploración.")
+            
             if result["days_available"] < horizon:
                 st.warning(f"Solo hay {result['days_available']} días de proyección para este horizonte.")
+            
             a, b, c, d = st.columns(4)
-            a.metric("Precio base", money(base_price))
-            b.metric("Precio al final", money(result["end_price"]))
+            a.metric("Precio actual (Mercado)", money(base_price))
+            b.metric("Precio al final del periodo", money(result["end_price"]))
             c.metric("Cambio proyectado", pct(result["variation_pct"]))
-            d.metric("Dirección general", result["trend"])
-            hist = data["history"][data["history"].coin_id == coin_id]
-            st.plotly_chart(price_chart(hist, future, base_date, asset.get("symbol")), width="stretch")
-            left, right = st.columns([1.1, 1], gap="large")
-            with left:
-                st.plotly_chart(range_chart(result, base_price), width="stretch")
-                st.caption("P10 y P90 son límites aproximados al final del horizonte. El punto amarillo es la trayectoria central; la línea azul indica el precio base.")
-            with right:
-                st.markdown("#### Fechas destacadas de la trayectoria central")
-                st.metric("Menor cierre proyectado", f"{pd.Timestamp(result['buy']['forecast_date']):%d/%m/%Y} · {money(result['buy']['predicted_price'])}")
-                st.metric("Mayor cierre proyectado", f"{pd.Timestamp(result['sell']['forecast_date']):%d/%m/%Y} · {money(result['sell']['predicted_price'])}")
-                st.caption("Son extremos del modelo dentro del horizonte seleccionado. No indican el mejor momento real para operar.")
-            with st.expander("Métricas de validación del modelo"):
-                st.caption("Calculadas con validación walk-forward sobre precios históricos; MAPE está expresado como porcentaje del precio real.")
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("RMSE relativo", pct(metric.get("rmse_price_pct")))
-                m2.metric("MSE relativo", f"{float(metric.get('mse_price_pct2')):,.2f} %²" if metric.get("mse_price_pct2") is not None else "Sin dato")
-                m3.metric("MAPE", pct(metric.get("mape_price_pct")))
-                m4.metric("MAE relativo", pct(metric.get("mae_price_pct")))
-            st.markdown("#### Hitos de la proyección")
-            milestones = [v for v in [15, 30, 60, 90, 180, 270, 365, 540, 730] if v <= len(future) and v <= horizon]
-            rows = []
-            for day in milestones:
-                row = future.iloc[day - 1]
-                rows.append({"Día": day, "Fecha": row.forecast_date.date(), "Precio central USD": row.predicted_price, "Cambio vs. base %": round((row.predicted_price / base_price - 1) * 100, 2), "Límite bajo P10 USD": row.p10, "Límite alto P90 USD": row.p90})
-            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, column_config={
-                "Precio central USD": st.column_config.NumberColumn("Precio central USD", format="$%.2f"),
-                "Cambio vs. base %": st.column_config.NumberColumn("Cambio vs. base %", format="%+.2f%%"),
-                "Límite bajo P10 USD": st.column_config.NumberColumn("Límite bajo P10 USD", format="$%.2f"),
-                "Límite alto P90 USD": st.column_config.NumberColumn("Límite alto P90 USD", format="$%.2f"),
-            })
-            st.caption(f"Pronóstico XGBoost generado el {pd.to_datetime(run['generated_at'], utc=True):%d/%m/%Y %H:%M UTC}. Cuanto más lejano el día, mayor incertidumbre.")
+            d.metric("Dirección general al final", result["trend"])
+      
+            st.plotly_chart(price_chart(hist_coin, future, base_date, asset.get("symbol")), width="stretch")
+      
+            st.markdown("---")
+            st.markdown("### Puntos Clave para Operar")
+            st.markdown("Identificación automática de los días estimados con menor y mayor valor dentro del periodo seleccionado.")
+            
+            col_buy, col_sell = st.columns(2, gap="medium")
+            
+            with col_buy:
+                st.markdown(
+                    f"""
+                    <div style="background-color: rgba(14, 209, 143, 0.1); border: 1px solid #0ed18f; padding: 20px; border-radius: 10px;">
+                        <h4 style="color: #0ed18f; margin: 0 0 10px 0;">🟢 Mejor día para comprar</h4>
+                        <p style="font-size: 22px; font-weight: bold; margin: 0 0 5px 0;">{money(result['buy']['predicted_price'])}</p>
+                        <p style="color: #a0aec0; margin: 0; font-size: 14px;">Fecha estimada: <b>{pd.Timestamp(result['buy']['forecast_date']):%d/%m/%Y}</b></p>
+                        <hr style="border-color: rgba(14, 209, 143, 0.2); margin: 10px 0;">
+                        <p style="font-size: 12px; color: #a0aec0; margin: 0;">Día futuro en el que se estima que el precio será el más bajo.</p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+                
+            with col_sell:
+                st.markdown(
+                    f"""
+                    <div style="background-color: rgba(234, 179, 8, 0.1); border: 1px solid #EAB308; padding: 20px; border-radius: 10px;">
+                        <h4 style="color: #EAB308; margin: 0 0 10px 0;">🟡 Mejor día para vender</h4>
+                        <p style="font-size: 22px; font-weight: bold; margin: 0 0 5px 0;">{money(result['sell']['predicted_price'])}</p>
+                        <p style="color: #a0aec0; margin: 0; font-size: 14px;">Fecha estimada: <b>{pd.Timestamp(result['sell']['forecast_date']):%d/%m/%Y}</b></p>
+                        <hr style="border-color: rgba(234, 179, 8, 0.2); margin: 10px 0;">
+                        <p style="font-size: 12px; color: #a0aec0; margin: 0;">Día futuro en el que se estima que el precio alcanzará su punto más alto.</p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+            
+            st.markdown("---")
+            
+        with st.expander("Métricas de validación del modelo"):
+            st.caption("Calculadas con validación walk-forward sobre precios históricos para medir la confiabilidad del modelo de predicción.")
+            
+            m1, m2, m3, m4 = st.columns(4)
+
+            m1.metric("RMSE relativo", f"{float(metric.get('rmse_price_pct', 0)):.1f}%")
+            m2.metric("MSE relativo", f"{float(metric.get('mse_price_pct2', 0)):.2f}%²" if metric.get("mse_price_pct2") is not None else "Sin dato")
+            m3.metric("MAPE", f"{float(metric.get('mape_price_pct', 0)):.1f}%")
+            m4.metric("MAE relativo", f"{float(metric.get('mae_price_pct', 0)):.1f}%")
+
+            d1, d2, d3, d4 = st.columns(4)
+            with d1:
+                st.caption("Representa el margen de error global en porcentaje frente al valor real del activo.")
+            with d2:
+                st.caption("Eleva al cuadrado los errores para penalizar y detectar desviaciones grandes del modelo.")
+            with d3:
+                st.caption("Muestra el porcentaje promedio de equivocación directa entre el precio estimado y el real.")
+            with d4:
+                st.caption("Mide la diferencia promedio absoluta en porcentaje entre la predicción y el mercado.")
+            
+        st.caption(f"Pronóstico XGBoost generado el {pd.to_datetime(run['generated_at'], utc=True):%d/%m/%Y %H:%M UTC}. Cuanto más lejano el día, mayor incertidumbre.")
+
     with comparison_tab:
-        available = [a["coin_id"] for a in assets if a["coin_id"] in data["runs"]]
-        defaults = [cid for cid in ["bitcoin", "ethereum", "solana", "binance-coin"] if cid in available]
-        chosen = st.multiselect("Monedas con pronóstico", available, default=defaults, format_func=lambda cid: symbol(data, cid), key="compare_predictive")
-        fig = figure("Cambio proyectado desde el precio base", 460, "%")
-        summary = []
-        for i, cid in enumerate(chosen):
-            run = data["runs"][cid]
-            group = forecasts[forecasts.coin_id == cid].sort_values("forecast_date").head(horizon)
-            info = forecast_stats(group, float(run["base_price"]), horizon)
-            if info:
-                change = (group.predicted_price / float(run["base_price"]) - 1) * 100
-                fig.add_trace(go.Scatter(x=group.forecast_date, y=change, mode="lines", name=symbol(data, cid), line=dict(color=palette[i % len(palette)], width=2.4)))
-                summary.append({"Moneda": symbol(data, cid), "Cambio al final %": round(info["variation_pct"], 2), "Precio final USD": info["end_price"], "Tendencia": info["trend"], "Cobertura del horizonte": f"{info['days_available']}/{horizon} días"})
-        fig.add_hline(y=0, line_color="#8996aa", line_dash="dot")
-        st.plotly_chart(fig, width="stretch")
-        st.caption("Cada línea empieza en el precio base de su moneda. Así se compara el cambio porcentual sin poner BTC y activos de bajo precio en el mismo eje USD.")
-        if summary:
-            final = pd.DataFrame(summary).sort_values("Cambio al final %", ascending=False)
-            bar = figure("Cambio estimado al final del horizonte", 350, "%")
-            bar.add_trace(go.Bar(x=final["Moneda"], y=final["Cambio al final %"], marker_color=[GREEN if x >= 0 else RED for x in final["Cambio al final %"]], text=[pct(x) for x in final["Cambio al final %"]], textposition="outside", showlegend=False))
-            bar.update_layout(xaxis_title="Moneda", yaxis_title="Cambio estimado (%)")
-            st.plotly_chart(bar, width="stretch")
-            st.dataframe(final, width="stretch", hide_index=True, column_config={
-                "Cambio al final %": st.column_config.NumberColumn("Cambio al final %", format="%+.2f%%"),
-                "Precio final USD": st.column_config.NumberColumn("Precio final USD", format="$%.4f"),
-            })
+            ignored_symbols = {"USDC", "USDT", "STETH", "XMR", "WSTETH", "USDS", "BSC-USD", "WBT"}
+            available_assets = [
+                a for a in assets 
+                if a["coin_id"] in data["runs"] and a.get("symbol") not in ignored_symbols
+            ]
+            
+            symbol_options = [a.get("symbol") for a in available_assets if a.get("symbol")]
+            default_symbols = [s for s in ["BTC", "ETH", "SOL", "BNB"] if s in symbol_options]
+            
+            st.markdown("#### Activos para comparar")
+            selected_symbols = st.multiselect(
+                "Selecciona las criptomonedas para el análisis comparativo de pronóstico:",
+                options=symbol_options,
+                default=default_symbols,
+                key="multiselect_forecast_comparison"
+            )
+            
+            symbol_to_coin_id = {a.get("symbol"): a["coin_id"] for a in available_assets}
+            chosen = [symbol_to_coin_id[sym] for sym in selected_symbols if sym in symbol_to_coin_id]
+            
+            fig = figure("Cambio proyectado desde el precio base", 460, "%")
+            summary = []
+            for i, cid in enumerate(chosen):
+                run = data["runs"][cid]
+                group = forecasts[forecasts.coin_id == cid].sort_values("forecast_date").head(horizon)
+                info = forecast_stats(group, float(run["base_price"]), horizon)
+                if info:
+                    change = (group.predicted_price / float(run["base_price"]) - 1) * 100
+                    fig.add_trace(go.Scatter(x=group.forecast_date, y=change, mode="lines", name=symbol(data, cid), line=dict(color=palette[i % len(palette)], width=2.4)))
+                    summary.append({"Moneda": symbol(data, cid), "Cambio al final %": round(info["variation_pct"], 2), "Precio final USD": info["end_price"], "Tendencia": info["trend"], "Cobertura del horizonte": f"{info['days_available']}/{horizon} días"})
+            
+            fig.add_hline(y=0, line_color="#8996aa", line_dash="dot")
+            st.plotly_chart(fig, width="stretch")
+            st.caption("Cada línea empieza en el precio base de su moneda. Así se compara el cambio porcentual sin poner BTC y activos de bajo precio en el mismo eje USD.")
+            
+            if summary:
+                final = pd.DataFrame(summary).sort_values("Cambio al final %", ascending=False)
+                st.markdown("#### Ranking de mejores criptomonedas según rendimiento proyectado")
+                st.dataframe(final, width="stretch", hide_index=True, column_config={
+                    "Cambio al final %": st.column_config.NumberColumn("Cambio al final %", format="%+.2f%%"),
+                    "Precio final USD": st.column_config.NumberColumn("Precio final USD", format="$%.4f"),
+                })
 
 with prescriptive:
-    st.subheader("Dictamen y escenarios de IA")
-    st.markdown('<div class="lead">El workflow actualiza el dictamen con Gemini después de refrescar mercado y noticias. Se muestra aquí el último análisis guardado para la moneda.</div>', unsafe_allow_html=True)
-    recommendation = data["recommendations"].get(coin_id)
-    run = data["runs"].get(coin_id)
+    st.subheader("Dictamen y Perspectiva del Asesor IA")
+    st.markdown(
+        '<div class="lead">Análisis predictivo actualizado de forma automática para acompañar tus decisiones de inversión de manera sencilla y clara.</div>', 
+        unsafe_allow_html=True
+    )
+    nota_default = "Este análisis tiene un enfoque estrictamente informativo, educativo y académico, y no constituye asesoría financiera especializada."
+    st.markdown(
+        f"""<div style="background-color: rgba(59, 130, 246, 0.1); border: 1px solid #3b82f6; padding: 15px; border-radius: 8px; color: #93c5fd; font-size: 0.9rem; margin-bottom: 20px;">
+            <b>Aviso académico y de investigación:</b> {nota_default}
+        </div>""",
+        unsafe_allow_html=True
+    )
+
+    recommendation = None
+    recs_store = data.get("ai_recommendations") if "ai_recommendations" in data else data.get("recommendations")
+    
+    if isinstance(recs_store, dict):
+        recommendation = recs_store.get(coin_id)
+    elif hasattr(recs_store, "empty") and not recs_store.empty:
+        coin_recs = recs_store[recs_store["coin_id"] == coin_id]
+        if not coin_recs.empty:
+            coin_recs = coin_recs.sort_values("generated_at", ascending=False)
+            recommendation = coin_recs.iloc[0].to_dict()
+
+    run = data["runs"].get(coin_id) if isinstance(data.get("runs"), dict) else None
     base_price = float(snap.get("price") or 0)
     verdict_horizon = int((recommendation or {}).get("horizon_days") or 30)
-    future = data["forecasts"][data["forecasts"].coin_id == coin_id].sort_values("forecast_date")
-    future = future[future.forecast_date >= pd.Timestamp.now(tz="UTC").normalize()].head(verdict_horizon)
-    result = forecast_stats(future, base_price, verdict_horizon)
-    if not result:
-        st.info("Aún no hay un pronóstico vigente para esta moneda. El dictamen requiere un modelo y un precio actual.")
+    
+    if recommendation is None:
+        st.info("Todavía no existe un dictamen registrado para esta moneda.")
     else:
-        if recommendation:
-            answer = recommendation["response"]
-            evidence = recommendation["evidence"]
-            generated = pd.to_datetime(recommendation["generated_at"], utc=True)
-            change = float(evidence.get("variation_pct") or 0)
-            direction = "ALCISTA" if change > 2 else "BAJISTA" if change < -2 else "ESTABLE"
-            st.caption(f"Gemini {recommendation.get('model','')} · actualizado {generated:%d/%m/%Y %H:%M UTC} · horizonte de {evidence.get('horizon_days',30)} días")
-            a, b, c = st.columns(3)
-            a.metric("Veredicto de IA", answer["postura"].replace("_", " "))
-            b.metric("Riesgo del pronóstico", answer["riesgo"])
-            c.metric("Tendencia prevista", direction)
-            if (pd.Timestamp.now(tz="UTC") - generated).total_seconds() > 8 * 3600:
-                st.warning("El dictamen tiene más de ocho horas. Revisa el último workflow de GitHub Actions.")
-            if not recommendation.get("is_latest"):
-                st.warning("Este dictamen fue generado antes de la actualización automática; la próxima ejecución del workflow lo renovará.")
-            if run and recommendation.get("forecast_run_id") != run.get("forecast_run_id"):
-                st.warning("El dictamen corresponde a una versión anterior del pronóstico; espera el próximo workflow.")
-            st.markdown("#### Resumen ejecutivo")
-            st.write(answer["resumen"])
+        answer = recommendation.get("response", recommendation)
+        evidence = recommendation.get("evidence", {})
+        
+        generated_raw = recommendation.get("generated_at")
+        if generated_raw:
+            generated = pd.to_datetime(generated_raw, utc=True)
+            fecha_str = f"{generated:%d/%m/%Y a las %H:%M UTC}"
         else:
-            evidence = None
-            st.info("Todavía no existe un dictamen de Gemini para esta moneda. Configura GEMINI_API_KEY en GitHub Actions y ejecuta el workflow de actualización.")
+            fecha_str = "Reciente"
+        veredicto_ia = str(answer.get("recomendacion", "MANTENER")).replace("_", " ").upper()
+        riesgo_ia = str(answer.get("riesgo", "MODERADO")).upper()
+        tendencia_raw = str(answer.get("tendencia_general", "LATERAL")).upper()
 
-        scenario_base = float(evidence.get("spot_price_usd") or base_price) if evidence else base_price
-        low = float(evidence.get("p10_usd") or result["p10"]) if evidence else result["p10"]
-        central = float(evidence.get("central_price_usd") or result["end_price"]) if evidence else result["end_price"]
-        high = float(evidence.get("p90_usd") or result["p90"]) if evidence else result["p90"]
-        a, b, c = st.columns(3)
-        for column, title, value in [(a, "Escenario bajo · P10", low), (b, "Escenario central", central), (c, "Escenario alto · P90", high)]:
-            column.metric(title, money(value), pct((value / scenario_base - 1) * 100))
-        left, right = st.columns([1.35, 1], gap="large")
-        with left:
-            vals = [(v / scenario_base - 1) * 100 for v in (low, central, high)]
-            fig = figure("Escenarios al cierre del horizonte · cambio vs. precio actual", 360, "%")
-            fig.add_trace(go.Bar(x=["Bajo P10", "Central", "Alto P90"], y=vals, marker_color=[RED, GOLD, GREEN], text=[pct(v) for v in vals], textposition="outside", customdata=[low, central, high], hovertemplate="%{x}<br>%{y:+.1f}%<br>US$ %{customdata:,.4f}<extra></extra>", showlegend=False))
-            fig.add_hline(y=0, line_color="#8c9ab0", line_dash="dot")
-            fig.update_layout(yaxis_title="Cambio respecto al precio actual (%)")
-            st.plotly_chart(fig, width="stretch")
-        with right:
-            news_for_coin = data["news"][data["news"]["mentioned_coin_ids"].apply(lambda ids: coin_id in ids if isinstance(ids, list) else False)]
-            news_week = news_for_coin[news_for_coin.published_at >= pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=7)]
-            sentiment_counts = [(news_week.sentiment_label == x).sum() for x in ("POSITIVO", "NEUTRAL", "NEGATIVO")]
-            fig = figure("Tono de noticias sobre la moneda · 7 días", 360, "Noticias")
-            fig.add_trace(go.Bar(x=["Positivo", "Neutral", "Negativo"], y=sentiment_counts, marker_color=[GREEN, "#8494aa", RED], text=sentiment_counts, textposition="outside", showlegend=False))
-            fig.update_layout(yaxis_title="Noticias detectadas")
-            st.plotly_chart(fig, width="stretch")
-            if news_week.empty:
-                st.caption("No hay menciones directas recientes; el dictamen debe apoyarse principalmente en precios y calidad del modelo.")
-        st.caption("P10–P90 es un rango aproximado del modelo. El sentimiento procede de titulares RSS analizados con VADER; ninguno garantiza el comportamiento futuro.")
+        tendencia_ia = "EN ALZA 📈" if "ALCISTA" in tendencia_raw else "EN BAJA 📉" if "BAJISTA" in tendencia_raw else "ESTABLE / LATERAL ⚖️"
+        
+        resumen_ejecutivo = answer.get("resumen_ejecutivo", "")
+        explicacion_detallada = answer.get("explicacion_detallada", "")
+        mejor_momento_venta = answer.get("mejor_momento_venta", "Por definir")
+        piso_estimado = answer.get("piso_estimado", "Por definir")
+        
+        fecha_piso = "Próximamente"
+        if evidence and "top_10_picos_bajos" in evidence and evidence["top_10_picos_bajos"]:
+            bajos = sorted(evidence["top_10_picos_bajos"], key=lambda x: float(x.get("precio_usd", 0)))
+            if bajos:
+                fecha_piso = bajos[0].get("fecha", "Próximamente")
 
-        if recommendation:
-            st.markdown("#### Tres escenarios para la decisión")
-            left, middle, right = st.columns(3, gap="large")
-            for column, title, key in [(left, "Si el mercado cae", "escenario_bajista"), (middle, "Caso central", "escenario_base"), (right, "Si el mercado sube", "escenario_alcista")]:
-                with column:
-                    st.markdown(f"**{title}**")
-                    st.write(answer[key])
-            st.markdown("#### Señales a vigilar")
-            for signal in answer.get("senales_a_vigilar", []):
-                st.write("• " + str(signal))
-            st.info(answer["limitaciones"])
-            with st.expander("Trazabilidad del dictamen"):
-                st.json(evidence)
+        st.caption(f"🤖 Análisis generado por IA · Actualizado el {fecha_str}")
+
+        col1, col2, col3 = st.columns(3)
+        
+        rec_color = "#10b981" if "COMPRAR" in veredicto_ia else "#ef4444" if "VENDER" in veredicto_ia else "#f59e0b"
+        with col1:
+            st.markdown(
+                f"""<div style="background-color: #1e293b; border-left: 5px solid {rec_color}; padding: 15px; border-radius: 8px;">
+                    <small style="color: #94a3b8; font-weight: bold;">RECOMENDACIÓN SUGERIDA</small>
+                    <h3 style="color: #f8fafc; margin: 5px 0 0 0;">{veredicto_ia}</h3>
+                </div>""", 
+                unsafe_allow_html=True
+            )
+        
+        riesgo_color = "#10b981" if "BAJO" in riesgo_ia else "#f59e0b" if "MODERADO" in riesgo_ia else "#ef4444"
+        with col2:
+            st.markdown(
+                f"""<div style="background-color: #1e293b; border-left: 5px solid {riesgo_color}; padding: 15px; border-radius: 8px;">
+                    <small style="color: #94a3b8; font-weight: bold;">NIVEL DE RIESGO DE INVERSIÓN</small>
+                    <h3 style="color: #f8fafc; margin: 5px 0 0 0;">{riesgo_ia}</h3>
+                </div>""", 
+                unsafe_allow_html=True
+            )
+        
+        with col3:
+            st.markdown(
+                f"""<div style="background-color: #1e293b; border-left: 5px solid #3b82f6; padding: 15px; border-radius: 8px;">
+                    <small style="color: #94a3b8; font-weight: bold;">TENDENCIA GENERAL</small>
+                    <h3 style="color: #f8fafc; margin: 5px 0 0 0; font-size: 1.2rem;">{tendencia_ia}</h3>
+                </div>""", 
+                unsafe_allow_html=True
+            )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        st.markdown("### Resumen Ejecutivo")
+        
+        col_img1, col_txt1 = st.columns([0.7, 4], gap="medium")
+        
+        with col_img1:
+            st.image("https://cdn-icons-png.flaticon.com/512/4559/4559130.png", use_container_width=True)
+            
+        with col_txt1:
+            st.markdown(
+                f"""<div style='font-size: 1.1rem; line-height: 1.6; color: #f1f5f9;'>
+                    {resumen_ejecutivo}
+                </div>""", 
+                unsafe_allow_html=True
+            )
+
+        st.markdown("### ¿Cómo evolucionará el precio?")
+        col_txt2, col_img2 = st.columns([3, 1], gap="medium")
+        with col_txt2:
+            texto_explicacion = explicacion_detallada
+            for keyword in ["COMPRAR", "VENDER", "MANTENER", "POSTERGAR_VENTA", "POSTERGAR_COMPRA"]:
+                if keyword in texto_explicacion:
+                    texto_explicacion = texto_explicacion.replace(
+                        f"la recomendación de {keyword}", 
+                        f"**<span style='color: #38bdf8; font-size: 1.1em;'>LA RECOMENDACIÓN CLAVE ES {keyword}</span>**"
+                    )
+            st.markdown(f"<div style='font-size: 1.05rem; line-height: 1.6;'>{texto_explicacion}</div>", unsafe_allow_html=True)
+            
+        with col_img2:
+            st.image("https://images.squarespace-cdn.com/content/v1/61e98da4007e4616fc0daad3/59dcf9d6-d897-4b75-863d-9e6e44525760/AdobeStock_1188413489.png", use_container_width=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        st.markdown("### Puntos Clave a Tener en Cuenta")
+        kp1, kp2 = st.columns(2, gap="medium")
+        
+        with kp1:
+            st.markdown(
+                f"""<div style="background-color: #0f172a; border: 1px solid #334155; padding: 20px; border-radius: 10px; text-align: center;">
+                    <div style="color: #94a3b8; font-size: 0.9rem; font-weight: bold; margin-bottom: 8px;">PRECIO MÍNIMO ESPERADO (SOPORTE)</div>
+                    <div style="color: #38bdf8; font-size: 1.4rem; font-weight: bold;">{piso_estimado}</div>
+                    <div style="color: #cbd5e1; font-size: 0.85rem; margin-top: 5px;">📅 Fecha estimada: {fecha_piso}</div>
+                </div>""",
+                unsafe_allow_html=True
+            )
+            
+        with kp2:
+            st.markdown(
+                f"""<div style="background-color: #0f172a; border: 1px solid #334155; padding: 20px; border-radius: 10px; text-align: center;">
+                    <div style="color: #94a3b8; font-size: 0.9rem; font-weight: bold; margin-bottom: 8px;">MOMENTO IDEAL DE VENTA</div>
+                    <div style="color: #34d399; font-size: 1.05rem; font-weight: bold; word-break: break-word;">{mejor_momento_venta}</div>
+                </div>""",
+                unsafe_allow_html=True
+            )

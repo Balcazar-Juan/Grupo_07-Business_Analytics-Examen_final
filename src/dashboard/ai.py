@@ -4,150 +4,268 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
+import time
 
 from src.db import get_db
 
+MODELOS_A_PROBAR = ["gemini-3.5-flash-lite", "gemini-3.5-flash"]
+TEMPERATURE = 0.2
+MAX_OUTPUT_TOKENS = 4000
 
 SCHEMA = {
     "type": "OBJECT",
     "properties": {
-        "postura": {"type": "STRING", "enum": ["OBSERVAR", "ESPERAR", "EVALUAR_COMPRA", "EVALUAR_VENTA"]},
-        "riesgo": {"type": "STRING", "enum": ["BAJO", "MEDIO", "ALTO"]},
-        "resumen": {"type": "STRING"},
-        "escenario_alcista": {"type": "STRING"},
-        "escenario_base": {"type": "STRING"},
-        "escenario_bajista": {"type": "STRING"},
-        "senales_a_vigilar": {"type": "ARRAY", "items": {"type": "STRING"}},
-        "limitaciones": {"type": "STRING"},
+        "recomendacion": {"type": "STRING", "enum": ["COMPRAR", "POSTERGAR_COMPRA", "MANTENER", "VENDER", "POSTERGAR_VENTA"]},
+        "riesgo": {"type": "STRING", "enum": ["BAJO", "MODERADO", "ALTO"]},
+        "tendencia_general": {"type": "STRING", "enum": ["ALCISTA", "BAJISTA", "LATERAL"]},
+        "resumen_ejecutivo": {"type": "STRING"},
+        "explicacion_detallada": {"type": "STRING"},
+        "mejor_momento_venta": {"type": "STRING"},
+        "piso_estimado": {"type": "STRING"},
+        "nota_informativa": {"type": "STRING"},
     },
-    "required": ["postura", "riesgo", "resumen", "escenario_alcista", "escenario_base", "escenario_bajista", "senales_a_vigilar", "limitaciones"],
+    "required": [
+        "recomendacion", 
+        "riesgo", 
+        "tendencia_general", 
+        "resumen_ejecutivo", 
+        "explicacion_detallada", 
+        "mejor_momento_venta", 
+        "piso_estimado",
+        "nota_informativa"
+    ],
 }
-
 
 def evidence_hash(evidence):
     return hashlib.sha256(json.dumps(evidence, sort_keys=True, default=str).encode()).hexdigest()
-
 
 def cached_recommendation(evidence):
     key = evidence_hash(evidence)
     return get_db().ai_recommendations.find_one({"evidence_hash": key}, {"_id": 0})
 
+def registrar_log_agente(
+    cantidad_insumos: int,
+    modelo_usado: str,
+    tiempo_ejecucion_seg: float,
+    estado: str,
+    tokens_meta: dict = None,
+    detalle_error: str = None,
+):
+    """Registra una traza de auditoría de la ejecución de la IA en la colección 'agent_logs'."""
+    try:
+        db = get_db()
+        log_entry = {
+            "fecha_hora": datetime.now(timezone.utc),
+            "nombre_agente": "crypto_forecast_agent",
+            "modelo_utilizado": modelo_usado,
+            "estado": estado,
+            "tiempo_ejecucion_segundos": round(tiempo_ejecucion_seg, 3),
+            "cantidad_insumos_procesados": cantidad_insumos,
+            "configuracion_parametros": {
+                "creatividad_temperatura": TEMPERATURE,
+                "limite_tokens_salida": MAX_OUTPUT_TOKENS,
+            },
+            "consumo_tokens": tokens_meta
+            or {
+                "tokens_entrada_prompt": 0,
+                "tokens_salida_respuesta": 0,
+                "tokens_totales_consumidos": 0,
+            },
+            "detalle_error": detalle_error,
+        }
+
+        db.agent_logs.insert_one(log_entry)
+        print("Registro técnico guardado exitosamente en 'agent_logs'.")
+    except Exception as e:
+        print(f"Error al guardar el log de auditoría en MongoDB: {e}")
+
 
 def generate_recommendation(evidence):
-    """Gemini redacta escenarios sobre cifras verificables; no calcula el forecast."""
+    """Gemini redacta una narrativa estrictamente orientada al futuro a partir de la fecha actual de análisis."""
     from google import genai
     from google.genai import types
 
     key = os.getenv("GEMINI_API_KEY", "")
     if not key:
         raise RuntimeError("Configura GEMINI_API_KEY para generar el análisis.")
-    model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+    
+    model = os.getenv("GEMINI_MODEL", MODELOS_A_PROBAR[0])
+    
     prompt = (
-        "Eres analista de riesgos de criptoactivos. Responde en español con escenarios "
-        "condicionales y acciones para evaluar, nunca como orden de inversión ni garantía. "
-        "Usa exclusivamente este JSON de evidencia; no inventes noticias, probabilidades ni métricas. "
-        "Menciona que P10/P90 son intervalos aproximados de un modelo recursivo y que la "
-        "fecha de compra/venta es el extremo de la trayectoria central, no una oportunidad cierta. "
-        "El sentimiento es una medición VADER de titulares RSS; no equivale a opinión de todo el mercado. "
-        "Si el modelo no supera el baseline o la cobertura es baja, prioriza ESPERAR u OBSERVAR. "
-        "Datos: " + json.dumps(evidence, ensure_ascii=False, default=str)
-    )
-    # Conservar vivo el cliente hasta leer la respuesta; una instancia temporal
-    # puede cerrarse antes de que termine la petición en algunos entornos.
-    with genai.Client(api_key=key) as client:
-        response = client.models.generate_content(
-            model=model, contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=SCHEMA),
+            "Eres un asesor financiero experto, amigable y excelente comunicador. Tu enfoque principal es que "
+            "una persona totalmente nueva en el mundo de las criptomonedas pueda entender el análisis sin dificultad.\n\n"
+            "REGLAS DE LENGUAJE Y CLARIDAD:\n"
+            "- Utiliza un lenguaje sumamente sencillo, comprensible y práctico, evitando por completo tecnicismos confusos (está prohibido usar palabras bursátiles avanzadas o términos abstractos como 'valles más profundos'; en su lugar, explícalo de forma coloquial como 'momentos de mayor caída' o 'puntos más bajos').\n\n"
+            "REGLA DE ORO OBLIGATORIA:\n"
+            "- Realiza el análisis asumiendo estrictamente el momento presente del análisis en adelante (hacia el futuro).\n"
+            "- Cuando menciones fechas, preséntalas estrictamente en formato de día, mes y año (Ejemplo: 14 de octubre de 2026).\n"
+            "- Para los precios, utiliza el formato numérico estándar con separador de miles y dos decimales (Ejemplo: $77,742.51 USD).\n"
+            "- ESTÁ PROHIBIDO mencionar, referenciar o incluir fechas y eventos pasados. Aunque en los datos se provea información histórica o el punto de partida, tu narrativa debe centrarse de manera exclusiva en la evolución pronosticada hacia adelante a lo largo de los próximos 30 días basándote en los 10 picos altos y 10 picos bajos futuros.\n\n"
+            "Reglas para determinar la recomendación y justificarla:\n"
+            "- 'COMPRAR': Si el precio actual es bajo y se proyecta un incremento fuerte y sostenido en el futuro cercano.\n"
+            "- 'POSTERGAR_COMPRA': Si el precio actual todavía va a bajar más antes de iniciar su tendencia al alza, por lo que conviene esperar al soporte más bajo.\n"
+            "- 'MANTENER': Si el precio no fluctúa mucho, se mantiene estable o en un rango lateral sin cambios drásticos que justifiquen mover la posición.\n"
+            "- 'VENDER': Si el precio actual es alto pero se proyecta una caída abrupta y sostenida en el futuro.\n"
+            "- 'POSTERGAR_VENTA': Si el precio actual va a tener un bache o bajada temporal, pero en el futuro alcanzará un valor mucho más alto (enfócate en detallar exactamente el día que costará más).\n\n"
+            "Estructura de la respuesta:\n"
+            "1. 'tendencia_general': Define si la trayectoria global futura es 'ALCISTA', 'BAJISTA' o 'LATERAL'.\n"
+            "2. 'recomendacion': Menciona el nombre completo de la moneda analizada y elige estrictamente entre 'COMPRAR', 'POSTERGAR_COMPRA', 'MANTENER', 'VENDER' o 'POSTERGAR_VENTA'.\n"
+            "3. 'resumen_ejecutivo': Redacta un párrafo robusto (de al menos 4 líneas) resumiendo el panorama futuro del activo, mencionando el nombre completo de la moneda, su precio actual, hacia dónde se dirige estrictamente en el horizonte pronosticado y mencionando la fecha del cierre estimado.\n"
+            "4. 'explicacion_detallada': Redacta una explicación fluida y muy didáctica sobre cómo evolucionará el precio a futuro para principiantes. Mencona el nombre de la moneda y cuenta la historia de la trayectoria de forma orgánica mencionando el precio actual de partida y cómo se moverá el mercado en los próximos días, indicando con fechas exactas futuras qué días alcanzará sus puntos más altos y más bajos (sin tecnicismos), y justificando claramente por qué se eligió la recomendación.\n"
+            "5. 'nota_informativa': Redacta un mensaje final sutil, comprensible y amigable que indique que este análisis tiene un enfoque estrictamente informativo, educativo y académico, y que no debe interpretarse como una asesoría financiera especializada.\n\n"
+            "Usa exclusivamente la información del JSON de evidencia suministrado:\n"
+            + json.dumps(evidence, ensure_ascii=False, default=str)
         )
-        response_text = response.text
-    result = json.loads(response_text or "{}")
-    missing = set(SCHEMA["required"]) - result.keys()
-    if missing or result.get("postura") not in SCHEMA["properties"]["postura"]["enum"]:
-        raise ValueError("Gemini devolvió una respuesta incompleta o inválida")
-    if evidence.get("beats_baseline") is not True or (evidence.get("coverage_pct") or 0) < 80:
-        result["postura"] = "OBSERVAR"
-        result["riesgo"] = "ALTO"
-        result["limitaciones"] += " Control de calidad: la postura se fijó en OBSERVAR porque el modelo no supera el baseline o la cobertura es insuficiente."
-    document = {
-        "evidence_hash": evidence_hash(evidence), "coin_id": evidence["coin_id"],
-        "horizon_days": evidence["horizon_days"], "forecast_run_id": evidence["forecast_run_id"],
-        "generated_at": datetime.now(timezone.utc), "model": model, "evidence": evidence,
-        "response": result, "is_latest": True,
-    }
-    db = get_db()
-    db.ai_recommendations.create_index("evidence_hash", unique=True)
-    db.ai_recommendations.update_one({"evidence_hash": document["evidence_hash"]}, {"$setOnInsert": document}, upsert=True)
-    db.ai_recommendations.update_many(
-        {"coin_id": evidence["coin_id"], "evidence_hash": {"$ne": document["evidence_hash"]}, "is_latest": True},
-        {"$set": {"is_latest": False}},
-    )
-    return document
+
+    start_time = time.time()
+    tokens_meta = {}
+    
+    try:
+        with genai.Client(api_key=key) as client:
+            response = client.models.generate_content(
+                model=model, 
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json", 
+                    response_schema=SCHEMA,
+                    temperature=TEMPERATURE,
+                    max_output_tokens=MAX_OUTPUT_TOKENS,
+                ),
+            )
+            response_text = response.text
+            
+            if hasattr(response, "usage_metadata") and response.usage_metadata:
+                usage = response.usage_metadata
+                tokens_meta = {
+                    "tokens_entrada_prompt": getattr(usage, "prompt_token_count", 0),
+                    "tokens_salida_respuesta": getattr(usage, "candidates_token_count", 0),
+                    "tokens_totales_consumidos": getattr(usage, "total_token_count", 0),
+                }
+
+        result = json.loads(response_text or "{}")
+        missing = set(SCHEMA["required"]) - result.keys()
+        if missing or result.get("recomendacion") not in SCHEMA["properties"]["recomendacion"]["enum"]:
+            raise ValueError("Gemini devolvió una respuesta incompleta o inválida")
+
+        elapsed_time = time.time() - start_time
+        
+        document = {
+            "evidence_hash": evidence_hash(evidence), "coin_id": evidence["coin_id"],
+            "horizon_days": evidence["horizon_days"], "forecast_run_id": evidence.get("forecast_run_id"),
+            "generated_at": datetime.now(timezone.utc), "model": model, "evidence": evidence,
+            "response": result, "is_latest": True,
+        }
+        db = get_db()
+        db.ai_recommendations.create_index("evidence_hash", unique=True)
+        db.ai_recommendations.update_one({"evidence_hash": document["evidence_hash"]}, {"$setOnInsert": document}, upsert=True)
+        db.ai_recommendations.update_many(
+            {"coin_id": evidence["coin_id"], "evidence_hash": {"$ne": document["evidence_hash"]}, "is_latest": True},
+            {"$set": {"is_latest": False}},
+        )
+
+        registrar_log_agente(
+            cantidad_insumos=1,
+            modelo_usado=model,
+            tiempo_ejecucion_seg=elapsed_time,
+            estado="EXITOSO",
+            tokens_meta=tokens_meta,
+        )
+
+        return document
+
+    except Exception as exc:
+        elapsed_time = time.time() - start_time
+        error_msg = str(exc)
+        registrar_log_agente(
+            cantidad_insumos=1,
+            modelo_usado=model,
+            tiempo_ejecucion_seg=elapsed_time,
+            estado="ERROR",
+            detalle_error=error_msg,
+        )
+        raise exc
 
 
 def build_live_evidence(db, asset, horizon_days=30):
-    """Combina el modelo vigente con el snapshot y noticias actuales de una moneda."""
+    """Extrae las proyecciones futuras (desde hoy en adelante) y calcula los 10 picos altos y 10 picos bajos."""
     coin_id = asset["coin_id"]
-    run = db.forecast_runs.find_one({"coin_id": coin_id, "is_latest": True})
+    
+    run = db.forecast_runs.find_one({"coin_id": coin_id, "is_latest": True}) or db.forecast_runs.find_one({"coin_id": coin_id})
     snapshot = db.market_snapshots.find_one({"coin_id": coin_id}, sort=[("observed_at", -1)])
-    metric = db.model_metrics.find_one({"coin_id": coin_id}, sort=[("trained_at", -1)]) or {}
-    quality = db.data_quality.find_one({"coin_id": coin_id}, sort=[("checked_at", -1)]) or {}
+    
     if not run or not snapshot or not isinstance(snapshot.get("price"), (int, float)) or snapshot["price"] <= 0:
         return None
+        
+    run_id = run.get("forecast_run_id") or run.get("run_id") or str(run.get("_id"))
     now = datetime.now(timezone.utc)
-    base_date = run.get("base_date")
-    if not base_date or now - (base_date if base_date.tzinfo else base_date.replace(tzinfo=timezone.utc)) > timedelta(days=10):
-        return None
+    today_date = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
     rows = list(db.forecasts_daily.find(
-        {"forecast_run_id": run["forecast_run_id"], "forecast_date": {"$gte": datetime(now.year, now.month, now.day, tzinfo=timezone.utc)}},
+        {
+            "$and": [
+                {"$or": [{"forecast_run_id": run_id}, {"run_id": run_id}, {"coin_id": coin_id}]},
+                {"forecast_date": {"$gte": today_date}}
+            ]
+        },
         {"_id": 0, "forecast_date": 1, "predicted_price": 1, "p10": 1, "p90": 1}
     ).sort("forecast_date", 1).limit(horizon_days))
+    
     if not rows:
         return None
-    target = rows[-1]
+
     current_price = float(snapshot["price"])
+    
+    sorted_by_price = sorted(rows, key=lambda x: float(x.get("predicted_price", 0)))
+    
+    lowest_10 = [
+        {"fecha": str(r.get("forecast_date")).split("T")[0], "precio_usd": round(float(r.get("predicted_price", 0)), 2)}
+        for r in sorted_by_price[:10]
+    ]
+    
+    highest_10 = [
+        {"fecha": str(r.get("forecast_date")).split("T")[0], "precio_usd": round(float(r.get("predicted_price", 0)), 2)}
+        for r in sorted_by_price[-10:][::-1]
+    ]
+    
+    target = rows[-1]
+    forecast_price = float(target.get("predicted_price", 0))
+    variation = round(((forecast_price - current_price) / current_price) * 100, 2)
+
     news = list(db.news.find(
         {"mentioned_coin_ids": coin_id, "published_at": {"$gte": now - timedelta(days=7)}},
         {"_id": 0, "sentiment_compound": 1, "sentiment_label": 1}
     ))
     scores = [float(n["sentiment_compound"]) for n in news if isinstance(n.get("sentiment_compound"), (int, float))]
-    forecast_price = float(target["predicted_price"])
+
     return {
-        "analysis_version": 2, "coin_id": coin_id, "symbol": asset.get("symbol"),
-        "forecast_run_id": run["forecast_run_id"], "horizon_days": len(rows),
-        "snapshot_at": str(snapshot.get("observed_at")), "spot_price_usd": round(current_price, 8),
-        "spot_change_24h_pct": snapshot.get("price_change_1d"),
-        "forecast_base_date": str(base_date), "forecast_base_price_usd": run.get("base_price"),
-        "end_date": str(target["forecast_date"]), "central_price_usd": round(forecast_price, 8),
-        "variation_pct": round((forecast_price / current_price - 1) * 100, 3),
-        "p10_usd": target.get("p10"), "p90_usd": target.get("p90"),
-        "coverage_pct": quality.get("requested_window_coverage_pct"),
-        "model_mae": metric.get("mae_log_return"), "baseline_mae": metric.get("baseline_mae_log_return"),
-        "beats_baseline": metric.get("beats_zero_return_baseline"),
-        "model_trained_at": str(metric.get("trained_at")),
-        "news_7d_count": len(news), "news_sentiment_7d_avg": round(sum(scores) / len(scores), 4) if scores else None,
-        "news_positive_7d": sum(n.get("sentiment_label") == "POSITIVO" for n in news),
-        "news_negative_7d": sum(n.get("sentiment_label") == "NEGATIVO" for n in news),
+        "coin_id": coin_id, "symbol": asset.get("symbol"),
+        "forecast_run_id": run_id,
+        "horizon_days": len(rows),
+        "fecha_analisis_actual": str(today_date.date()),
+        "spot_price_usd": round(current_price, 2),
+        "precio_final_proyectado_usd": round(forecast_price, 2),
+        "variacion_porcentual": variation,
+        "top_10_picos_altos": highest_10,
+        "top_10_picos_bajos": lowest_10,
+        "sentimiento_noticias_7d": round(sum(scores) / len(scores), 2) if scores else 0,
     }
 
 
 def generate_all():
-    """Genera un dictamen vigente por moneda después de cada actualización ETL."""
+    """Genera dictámenes actualizados para las monedas activas forzando la regeneración con 10 picos y reglas futuras."""
     if not os.getenv("GEMINI_API_KEY"):
         return {"status": "skipped_missing_gemini_key", "generated": 0, "cached": 0, "failed": []}
     db = get_db()
     max_assets = max(1, int(os.getenv("AI_MAX_PER_RUN", "20")))
-    horizon = max(1, int(os.getenv("AI_HORIZON_DAYS", "30")))
     assets = db.assets.find({"active_top_n": True}, {"_id": 0, "coin_id": 1, "symbol": 1}).sort("rank", 1).limit(max_assets)
+    horizon = max(1, int(os.getenv("AI_HORIZON_DAYS", "30")))
+    
     generated, cached, failed = 0, 0, []
     for asset in assets:
         try:
             evidence = build_live_evidence(db, asset, horizon)
             if not evidence:
                 continue
-            existing = cached_recommendation(evidence)
-            if existing:
-                cached += 1
-                continue
+            
             generate_recommendation(evidence)
             generated += 1
         except Exception as exc:
