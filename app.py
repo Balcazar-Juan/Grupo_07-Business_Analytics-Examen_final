@@ -101,11 +101,11 @@ except Exception as exc:
 
 assets = data["assets"]
 
-ignored_global_symbols = {"USDC", "USDT", "STETH", "XMR", "WSTETH", "USDS", "BSC-USD", "WBT"}
+ignored_global_symbols = {"USDC", "USDT", "STETH", "XMR", "WSTETH", "USDS", "BSC-USD", "WBT", "HYPE"}
 assets = [
     a for a in assets 
     if a.get("symbol") not in ignored_global_symbols 
-    and a["coin_id"] not in {"usdc", "usdt", "steth", "xmr", "wsteth", "usds", "bsc-usd", "wbt"}
+    and a["coin_id"] not in {"usdc", "usdt", "steth", "xmr", "wsteth", "usds", "bsc-usd", "wbt", "hyperliquid"}
 ]
 labels = {f"{a.get('symbol','?')} · {a.get('name',a['coin_id'])}": a["coin_id"] for a in assets}
 selected = st.sidebar.selectbox("Moneda de análisis", list(labels))
