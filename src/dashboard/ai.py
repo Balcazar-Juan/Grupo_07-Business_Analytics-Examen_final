@@ -102,7 +102,7 @@ def generate_recommendation(evidence, max_retries=3):
             "Reglas para determinar la recomendación y justificarla:\n"
             "- 'COMPRAR': Si el precio actual es bajo y se proyecta un incremento fuerte y sostenido en el futuro cercano.\n"
             "- 'POSTERGAR_COMPRA': Si el precio actual todavía va a bajar más antes de iniciar su tendencia al alza, por lo que conviene esperar al soporte más bajo.\n"
-            "- 'MANTENER': Si el precio no fluctúa mucho, se mantiene estable o en un rango lateral sin cambios drásticos que justifiquen mover la posición.\n"
+            "- 'MANTENER': Si el precio no fluctúa demasiado, se mantiene estable o en un rango lateral sin cambios drásticos que justifiquen mover la posición.\n"
             "- 'VENDER': Si el precio actual es alto pero se proyecta una caída abrupta y sostenida en el futuro.\n"
             "- 'POSTERGAR_VENTA': Si el precio actual va a tener un bache o bajada temporal, pero en el futuro alcanzará un valor mucho más alto (enfócate en detallar exactamente el día que costará más).\n\n"
             "Estructura de la respuesta:\n"
