@@ -352,10 +352,13 @@ def forecast_one(coin_id: str, days: int | None = None):
     prices, source = price_df(db, coin_id)
     if prices.empty:
         return {"coin_id": coin_id, "status": "no_market_daily"}
+
     if (datetime.now(timezone.utc) - pd.to_datetime(prices.iloc[-1]["date"], utc=True).to_pydatetime()).days > 3:
-        db.forecast_runs.update_many({"coin_id": coin_id, "is_latest": True}, {"$set": {"is_latest": False}})
-        db.forecasts_daily.update_many({"coin_id": coin_id, "is_latest": True}, {"$set": {"is_latest": False}})
-        return {"coin_id": coin_id, "status": "stale_history", "last_date": str(prices.iloc[-1]["date"])}
+        return {
+            "coin_id": coin_id,
+            "status": "stale_history",
+            "last_date": str(prices.iloc[-1]["date"])
+        }
 
     prices = prices[["date", "close", "volume"]].copy()
     prices["date"] = pd.to_datetime(prices["date"], utc=True)
