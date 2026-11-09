@@ -100,13 +100,13 @@ except Exception as exc:
     st.stop()
 
 assets = data["assets"]
-
 ignored_global_symbols = {"USDC", "USDT", "STETH", "XMR", "WSTETH", "USDS", "BSC-USD", "WBT", "HYPE"}
 assets = [
     a for a in assets 
     if a.get("symbol") not in ignored_global_symbols 
     and a["coin_id"] not in {"usdc", "usdt", "steth", "xmr", "wsteth", "usds", "bsc-usd", "wbt", "hyperliquid"}
 ]
+
 labels = {f"{a.get('symbol','?')} · {a.get('name',a['coin_id'])}": a["coin_id"] for a in assets}
 selected = st.sidebar.selectbox("Moneda de análisis", list(labels))
 coin_id = labels[selected]
@@ -267,6 +267,8 @@ with predictive:
         run = data["runs"].get(coin_id)
         future = forecasts[forecasts.coin_id == coin_id].sort_values("forecast_date").head(horizon)
         result = forecast_stats(future, float((run or {}).get("base_price") or 0), horizon)
+
+        metric = data.get("metrics", {}).get(coin_id, {})
         
         if not run or not result:
             st.info("Esta moneda aún no tiene un pronóstico vigente. Selecciona otra moneda con histórico suficiente.")
@@ -323,28 +325,34 @@ with predictive:
             
             st.markdown("---")
             
-        with st.expander("Métricas de validación del modelo"):
+    with st.expander("Métricas de validación del modelo"):
             st.caption("Calculadas con validación walk-forward sobre precios históricos para medir la confiabilidad del modelo de predicción.")
-            
-            m1, m2, m3, m4 = st.columns(4)
+            cm1, cm2, cm3, cm4 = st.columns(4)
 
-            m1.metric("RMSE relativo", f"{float(metric.get('rmse_price_pct', 0)):.1f}%")
-            m2.metric("MSE relativo", f"{float(metric.get('mse_price_pct2', 0)):.2f}%²" if metric.get("mse_price_pct2") is not None else "Sin dato")
-            m3.metric("MAPE", f"{float(metric.get('mape_price_pct', 0)):.1f}%")
-            m4.metric("MAE relativo", f"{float(metric.get('mae_price_pct', 0)):.1f}%")
+            cm1.metric("RMSE relativo", f"{float(metric.get('rmse_price_pct', 0)):.1f}%")
+            cm2.metric("MSE relativo", f"{float(metric.get('mse_price_pct2', 0)):.2f}%²" if metric.get("mse_price_pct2") is not None else "Sin dato")
+            cm3.metric("MAPE", f"{float(metric.get('mape_price_pct', 0)):.1f}%")
+            cm4.metric("MAE relativo", f"{float(metric.get('mae_price_pct', 0)):.1f}%")
 
-            d1, d2, d3, d4 = st.columns(4)
-            with d1:
+            cd1, cd2, cd3, cd4 = st.columns(4)
+            with cd1:
                 st.caption("Representa el margen de error global en porcentaje frente al valor real del activo.")
-            with d2:
+            with cd2:
                 st.caption("Eleva al cuadrado los errores para penalizar y detectar desviaciones grandes del modelo.")
-            with d3:
+            with cd3:
                 st.caption("Muestra el porcentaje promedio de equivocación directa entre el precio estimado y el real.")
-            with d4:
+            with cd4:
                 st.caption("Mide la diferencia promedio absoluta en porcentaje entre la predicción y el mercado.")
             
-        st.caption(f"Pronóstico XGBoost generado el {pd.to_datetime(run['generated_at'], utc=True):%d/%m/%Y %H:%M UTC}. Cuanto más lejano el día, mayor incertidumbre.")
-
+            if run and run.get("generated_at"):
+                fecha_generacion = pd.to_datetime(run["generated_at"], utc=True)
+                st.caption(
+                    f"Pronóstico XGBoost generado el {fecha_generacion:%d/%m/%Y %H:%M UTC}. "
+                    "Cuanto más lejano el día, mayor incertidumbre."
+                )
+            else:
+                st.caption("No hay información disponible sobre la fecha de generación del pronóstico.")
+            
     with comparison_tab:
             ignored_symbols = {"USDC", "USDT", "STETH", "XMR", "WSTETH", "USDS", "BSC-USD", "WBT"}
             available_assets = [
