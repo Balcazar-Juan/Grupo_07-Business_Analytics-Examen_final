@@ -14,7 +14,7 @@ from src.db import get_db
 from src.ml.features import FEATURES, build
 
 STABLE = {"USDT", "USDC", "DAI", "FDUSD", "USDE", "USDS", "PYUSD", "TUSD", "FRAX"}
-DIRECT_HORIZONS = (1, 3, 7, 14, 21, 30, 45, 60, 90, 120, 150, 180, 240, 300, 365, 450, 540, 600, 660, 730)
+DIRECT_HORIZONS = (1, 3, 5, 7, 10, 14, 18, 21, 25, 30, 35, 40, 45, 50, 55, 60, 70, 80, 90, 105, 120, 135, 150, 165, 180, 195, 210, 225, 240, 255, 270, 285, 300, 315, 330, 345, 365, 390, 420, 450, 540, 600, 660, 730)
 HISTORY_WARNING_DAYS = 3
 HISTORY_MAX_NEW_FORECAST_DAYS = 7
 
@@ -76,7 +76,6 @@ def _new_model(params=None):
 
 
 def _select_params(feat: pd.DataFrame):
-    """Selecciona hiperparámetros en un corte temporal, sin mirar el futuro."""
     if len(feat) < 600:
         return dict(DEFAULT_PARAMS)
     split = int(len(feat) * 0.8)
@@ -166,7 +165,6 @@ def _evaluate_walk_forward(feat: pd.DataFrame, params=None):
 
 
 def _train_direct_models(db, coin_id, asset, prices, selected_params, source, trained_at):
-    """Entrena modelos directos por horizonte con validación temporal y purga."""
     base = build(prices, target=False)
     direct_metrics = {}
     for horizon in DIRECT_HORIZONS:
@@ -179,7 +177,7 @@ def _train_direct_models(db, coin_id, asset, prices, selected_params, source, tr
         frame = frame.replace([np.inf, -np.inf], np.nan).dropna(subset=FEATURES + [target_col])
         if len(frame) < settings.model_min_rows:
             continue
-     
+
         split = int(len(frame) * 0.8)
         train, valid = frame.iloc[:max(0, split - horizon)], frame.iloc[split:]
         if len(train) < settings.model_min_rows or len(valid) < 10:
@@ -192,7 +190,7 @@ def _train_direct_models(db, coin_id, asset, prices, selected_params, source, tr
         actual_price = current * np.exp(actual)
         pred_price = current * np.exp(pred)
         residual_std = float(np.std(actual - pred, ddof=1)) if len(actual) > 1 else 0.0
-     
+
         model_final = _new_model(selected_params)
         model_final.fit(frame[FEATURES], frame[target_col], verbose=False)
         raw = bytes(model_final.get_booster().save_raw(raw_format="json"))
@@ -309,14 +307,40 @@ def _load_booster(model_doc):
     return booster
 
 
-def _daily_model_shape(prices, model_doc, days, anchor_days):
-    """Señal diaria real del modelo 1d; no añade ruido aleatorio.
+def _smooth_anchor_curve(x, y, days):
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if len(x) < 3:
+        return np.interp(np.arange(days + 1), x, y)
+    h = np.diff(x)
+    slopes = np.diff(y) / h
+    tangents = np.zeros(len(x), dtype=float)
+    for i in range(1, len(x) - 1):
+        previous, following = slopes[i - 1], slopes[i]
+        if previous * following > 0:
+            w1 = 2 * h[i] + h[i - 1]
+            w2 = h[i] + 2 * h[i - 1]
+            tangents[i] = (w1 + w2) / (w1 / previous + w2 / following)
+    first = ((2 * h[0] + h[1]) * slopes[0] - h[0] * slopes[1]) / (h[0] + h[1])
+    last = ((2 * h[-1] + h[-2]) * slopes[-1] - h[-1] * slopes[-2]) / (h[-1] + h[-2])
+    tangents[0] = 0.0 if first * slopes[0] <= 0 else min(abs(first), 3 * abs(slopes[0])) * np.sign(first)
+    tangents[-1] = 0.0 if last * slopes[-1] <= 0 else min(abs(last), 3 * abs(slopes[-1])) * np.sign(last)
+    curve = np.zeros(days + 1, dtype=float)
+    for a, b, ya, yb, ma, mb in zip(x[:-1], x[1:], y[:-1], y[1:], tangents[:-1], tangents[1:]):
+        positions = np.arange(int(a), min(int(b), days) + 1)
+        t = (positions - a) / (b - a)
+        width = b - a
+        curve[positions] = ((2 * t**3 - 3 * t**2 + 1) * ya
+                            + (t**3 - 2 * t**2 + t) * width * ma
+                            + (-2 * t**3 + 3 * t**2) * yb
+                            + (t**3 - t**2) * width * mb)
+    return curve
 
-    Se proyecta de forma recursiva y se centra dentro de cada intervalo
-    para conservar exactamente los niveles estimados por modelos directos.
-    """
+
+def _daily_model_shape(prices, model_doc, days, anchor_days):
+    shape = np.zeros(days + 1, dtype=float)
     if not model_doc or not anchor_days or days < 2:
-        return np.zeros(days + 1)
+        return shape
     try:
         booster = _load_booster(model_doc)
         lo = float(model_doc.get("return_clip_low", -0.15))
@@ -325,33 +349,38 @@ def _daily_model_shape(prices, model_doc, days, anchor_days):
         path["date"] = pd.to_datetime(path["date"], utc=True)
         nonzero = pd.to_numeric(path["volume"], errors="coerce").replace(0, np.nan).dropna()
         volume = float(nonzero.tail(30).median()) if not nonzero.empty else 0.0
-        running = np.zeros(days + 1)
+        running = np.zeros(days + 1, dtype=float)
         for d in range(1, days + 1):
             feat = build(path, target=False)
             if feat.empty:
-                return np.zeros(days + 1)
+                return shape
             X = feat.iloc[[-1]][FEATURES]
             delta = float(booster.predict(DMatrix(X, feature_names=FEATURES))[0])
+            if not math.isfinite(delta):
+                return shape
             delta = float(np.clip(delta, lo, hi))
-            running[d] = running[d-1] + delta
+            running[d] = running[d - 1] + delta
             next_date = pd.Timestamp(path.iloc[-1]["date"]) + pd.Timedelta(days=1)
             next_price = float(path.iloc[-1]["close"]) * math.exp(delta)
             path.loc[len(path)] = [next_date, next_price, volume]
-        shape = np.zeros(days + 1)
-        knots = [0] + [k for k in anchor_days if k <= days]
+        returns = np.log(pd.to_numeric(prices["close"], errors="coerce")).diff().replace([np.inf, -np.inf], np.nan).dropna().tail(90)
+        volatility = float(returns.std()) if len(returns) >= 20 else 0.0
+        knots = sorted(set([0] + [int(k) for k in anchor_days if 0 < k <= days]))
         for a, b in zip(knots[:-1], knots[1:]):
             if b - a <= 1:
                 continue
-            position = np.arange(a, b + 1)
-            linear = running[a] + (running[b] - running[a]) * (position-a)/(b-a)
-            shape[position] = running[position] - linear
-        returns = np.log(pd.to_numeric(prices["close"], errors="coerce")).diff().dropna().tail(90)
-        vol = float(returns.std()) if len(returns) >= 20 else 0.0
-        cap = min(0.12, 2.0 * vol)
-        return np.clip(shape, -cap, cap)
-    except (ValueError, TypeError, KeyError, OverflowError) as exc:
+            positions = np.arange(a, b + 1)
+            baseline = running[a] + (running[b] - running[a]) * (positions - a) / (b - a)
+            deviations = running[positions] - baseline
+            cap = min(0.20, 2.5 * volatility * math.sqrt((b - a) / 30.0))
+            if cap > 0:
+                shape[positions] = np.clip(deviations, -cap, cap)
+            shape[a] = 0.0
+            shape[b] = 0.0
+        return shape
+    except (ValueError, TypeError, KeyError, OverflowError, FloatingPointError) as exc:
         print(f"WARN daily_shape: {type(exc).__name__}: {exc}")
-        return np.zeros(days + 1)
+        return np.zeros(days + 1, dtype=float)
 
 
 def _direct_forecast_docs(db, coin_id, asset, prices, source, days, model_version, generated_at, run_id, model_doc=None):
@@ -378,10 +407,11 @@ def _direct_forecast_docs(db, coin_id, asset, prices, source, days, model_versio
     hs = np.array([x[0] for x in anchors], dtype=float)
     logs = np.array([x[1] for x in anchors], dtype=float)
     errs = np.array([x[2] for x in anchors], dtype=float)
+    central_curve = _smooth_anchor_curve(hs, logs, days)
     docs = []
     previous = base_price
     for day in range(1, days + 1):
-        log_price = float(np.interp(day, hs, logs)) + float(shape[day])
+        log_price = float(central_curve[day]) + float(shape[day])
         uncertainty = float(np.interp(day, hs, errs))
         price = math.exp(log_price)
         lower = math.exp(log_price - uncertainty)
@@ -545,12 +575,6 @@ def forecast_one(coin_id: str, days: int | None = None):
 
 
 def forecast_all(days: int | None = None):
-    """Genera forecast solo para los activos vigentes del Top N.
-
-    Evita arrastrar modelos antiguos de monedas que ya no forman parte del universo
-    activo. Los stablecoins pueden aparecer con estado ``no_model`` porque se omiten
-    deliberadamente durante el entrenamiento.
-    """
     db = get_db()
     ids = [
         x["coin_id"]
