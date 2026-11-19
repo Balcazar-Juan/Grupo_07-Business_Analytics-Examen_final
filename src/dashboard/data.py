@@ -22,7 +22,7 @@ def load_real():
     if not assets:
         raise ValueError("MongoDB está conectado, pero assets aún no tiene monedas. Ejecuta scripts/bootstrap.py.")
     ids = [a["coin_id"] for a in assets]
-    since = datetime.now(timezone.utc) - timedelta(days=400)
+    since = datetime.now(timezone.utc) - timedelta(days=760)
     history = _frame(db.market_daily.find({"coin_id": {"$in": ids}, "date": {"$gte": since}}, {"_id": 0}), ["coin_id", "date", "close", "volume", "source"])
     history["date"] = pd.to_datetime(history["date"], utc=True)
     history["close"] = pd.to_numeric(history["close"], errors="coerce")
