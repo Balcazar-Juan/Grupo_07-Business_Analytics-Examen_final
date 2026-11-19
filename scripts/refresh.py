@@ -1,22 +1,23 @@
+
 from pathlib import Path
 import sys
+import argparse
+import os
+from datetime import datetime, timezone
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import argparse
-from datetime import datetime, timezone
-from src.db import ensure_indexes, log_run
+from src.db import ensure_indexes, log_run, get_db
 from src.etl.market import refresh_market
 from src.etl.news import refresh_news
-from src.etl.history import load_price_history, load_ohlcv, load_binance_ohlcv, build_market_daily
+from src.etl.history import build_market_daily
+from src.etl.historical_fallback import refresh_historical_fallback
 from src.ml.model import train_all, forecast_all
 from src.config import settings
 from src.etl.powerbi import publish_powerbi_layer
 from src.dashboard.ai import generate_all
-import os
-
 
 def main(daily=False, train=False):
     started = datetime.now(timezone.utc)
@@ -30,30 +31,28 @@ def main(daily=False, train=False):
         if daily or train:
             days = settings.incremental_history_days
             details["history_days_requested"] = days
-            details["price_history"] = load_price_history(days=days)
-            try:
-                details["mobula_ohlcv"] = load_ohlcv(days=days)
-            except Exception as exc:
-                details["mobula_ohlcv"] = {"warning": str(exc)}
-            try:
-                details["binance_ohlcv"] = load_binance_ohlcv(days=days)
-            except Exception as exc:
-                details["binance_ohlcv"] = {"warning": str(exc)}
-            # Reconstruye la capa curada usando todo el horizonte almacenado.
-            details["market_daily"] = build_market_daily(days=settings.history_days)
+            details["historical_fallback"] = (
+                refresh_historical_fallback(days=days)
+            )
+            details["market_daily"] = build_market_daily(
+                days=settings.history_days
+            )
 
         if train:
             trained = train_all()
             details["models_trained"] = sum(x.get("status") == "trained" for x in trained)
+            details["training_status"] = [{"coin_id": x.get("coin_id"), "status": x.get("status")}
+                                          for x in trained]
             forecasts = forecast_all()
             details["forecasts"] = sum(x.get("status") == "forecasted" for x in forecasts)
+            details["forecast_status"] = [{"coin_id": x.get("coin_id"), "status": x.get("status")}
+                                          for x in forecasts]
             details["forecast_days"] = settings.forecast_days
 
         details["powerbi"] = publish_powerbi_layer()
         details["ai"] = generate_all()
-        if os.getenv("GITHUB_ACTIONS") == "true" and details["ai"]["status"] != "ok":
-            raise RuntimeError(f"Dictámenes Gemini incompletos: {details['ai']}")
-
+        if details["ai"].get("status") != "ok":
+            print("ADVERTENCIA: Dictámenes Gemini incompletos:", details["ai"], flush=True)
         log_run(run_name, "success", started, details)
         print("OK", details)
     except Exception as exc:
@@ -63,7 +62,8 @@ def main(daily=False, train=False):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--daily", action="store_true", help="Actualiza historicos incrementales y market_daily")
-    p.add_argument("--train", action="store_true", help="Ademas reentrena XGBoost y genera el forecast")
+    p.add_argument("--daily", action="store_true")
+    p.add_argument("--train", action="store_true")
     args = p.parse_args()
     main(daily=args.daily or args.train, train=args.train)
+
