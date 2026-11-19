@@ -1,8 +1,4 @@
 
-
-
-
-
 from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -19,7 +15,11 @@ from src.db import get_db
 from src.ml.features import FEATURES, build
 
 STABLE = {"USDT", "USDC", "DAI", "FDUSD", "USDE", "USDS", "PYUSD", "TUSD", "FRAX"}
-DIRECT_HORIZONS = (1, 3, 7, 14, 21, 30, 45, 60, 90, 120, 150, 180, 240, 300, 365, 450, 540, 600, 660, 730)
+# Definimos 20 fechas clave para estimar precios futuros sin entrenar un modelo para cada día.
+DIRECT_HORIZONS = (1, 3, 7, 10, 14, 21, 30, 45, 60, 75, 90, 105, 120, 150, 180, 210, 240, 270, 300, 365)
+MAX_FORECAST_DAYS = 365
+# Escalamos los cambios de precio durante el entrenamiento para que XGBoost detecte mejor sus patrones.
+TARGET_SCALE = 100.0
 HISTORY_WARNING_DAYS = 3
 HISTORY_MAX_NEW_FORECAST_DAYS = 7
 
@@ -28,6 +28,7 @@ def is_stable(asset):
     return bool(asset.get("is_stablecoin")) or str(asset.get("symbol", "")).upper() in STABLE
 
 
+# Recuperamos los precios y volúmenes históricos de cada criptomoneda desde MongoDB.
 def price_df(db, coin_id):
     rows = list(db.market_daily.find(
         {"coin_id": coin_id},
@@ -64,9 +65,9 @@ def persist_features(coin_id: str, feat: pd.DataFrame):
 
 
 DEFAULT_PARAMS = {
-        "n_estimators": 500, "max_depth": 3, "learning_rate": 0.035,
-        "min_child_weight": 5, "subsample": 0.85, "colsample_bytree": 0.85,
-        "reg_lambda": 4.0, "reg_alpha": 0.10, "gamma": 0.05,
+        "n_estimators": 450, "max_depth": 3, "learning_rate": 0.035,
+        "min_child_weight": 2, "subsample": 0.85, "colsample_bytree": 0.85,
+        "reg_lambda": 2.0, "reg_alpha": 0.01, "gamma": 0.0,
 }
 
 
@@ -80,28 +81,30 @@ def _new_model(params=None):
     )
 
 
+# Probamos configuraciones y elegimos la que tiene menos error en datos posteriores al entrenamiento.
 def _select_params(feat: pd.DataFrame):
-    """Selecciona hiperparámetros en un corte temporal, sin mirar el futuro."""
     if len(feat) < 600:
         return dict(DEFAULT_PARAMS)
     split = int(len(feat) * 0.8)
     train, valid = feat.iloc[:split - 1], feat.iloc[split:]
     candidates = [
         DEFAULT_PARAMS,
-        {**DEFAULT_PARAMS, "max_depth": 2, "min_child_weight": 8, "reg_lambda": 8.0},
-        {**DEFAULT_PARAMS, "max_depth": 4, "min_child_weight": 3, "learning_rate": 0.025, "n_estimators": 650},
+        {**DEFAULT_PARAMS, "max_depth": 2, "min_child_weight": 4, "reg_lambda": 5.0},
+        {**DEFAULT_PARAMS, "max_depth": 4, "min_child_weight": 2, "learning_rate": 0.025, "n_estimators": 600},
     ]
     scores = []
     for params in candidates:
         model = _new_model(params)
-        model.fit(train[FEATURES], train["target_log_return_next"], verbose=False)
-        pred = model.predict(valid[FEATURES])
+        model.fit(train[FEATURES], train["target_log_return_next"] * TARGET_SCALE, verbose=False)
+        pred = model.predict(valid[FEATURES]) / TARGET_SCALE
         scores.append((mean_absolute_error(valid["target_log_return_next"], pred), params))
     return dict(min(scores, key=lambda item: item[0])[1])
 
 
+# Evaluamos el modelo en varios periodos consecutivos, siempre prediciendo datos que aún no vio.
 def _evaluate_walk_forward(feat: pd.DataFrame, params=None):
     n_splits = 4 if len(feat) >= 800 else 3
+    # Cada prueba usa primero el pasado y después un periodo más reciente.
     splitter = TimeSeriesSplit(n_splits=n_splits, gap=1)
     rows = []
     residuals = []
@@ -112,8 +115,8 @@ def _evaluate_walk_forward(feat: pd.DataFrame, params=None):
         train = feat.iloc[train_idx]
         test = feat.iloc[test_idx]
         model = _new_model(params)
-        model.fit(train[FEATURES], train["target_log_return_next"])
-        pred = model.predict(test[FEATURES])
+        model.fit(train[FEATURES], train["target_log_return_next"] * TARGET_SCALE)
+        pred = model.predict(test[FEATURES]) / TARGET_SCALE
         actual = test["target_log_return_next"].to_numpy()
         current_prices = test["close"].to_numpy(dtype=float)
         actual_price = current_prices * np.exp(actual)
@@ -170,8 +173,8 @@ def _evaluate_walk_forward(feat: pd.DataFrame, params=None):
     }
 
 
+# Entrenamos un modelo para cada horizonte: por ejemplo, 7, 30, 90 o 365 días.
 def _train_direct_models(db, coin_id, asset, prices, selected_params, source, trained_at):
-    """Entrena modelos directos por horizonte con validación temporal y purga."""
     base = build(prices, target=False)
     direct_metrics = {}
     for horizon in DIRECT_HORIZONS:
@@ -184,36 +187,37 @@ def _train_direct_models(db, coin_id, asset, prices, selected_params, source, tr
         frame = frame.replace([np.inf, -np.inf], np.nan).dropna(subset=FEATURES + [target_col])
         if len(frame) < settings.model_min_rows:
             continue
-     
+
         split = int(len(frame) * 0.8)
         train, valid = frame.iloc[:max(0, split - horizon)], frame.iloc[split:]
         if len(train) < settings.model_min_rows or len(valid) < 10:
             continue
         model = _new_model(selected_params)
-        model.fit(train[FEATURES], train[target_col], verbose=False)
-        pred = model.predict(valid[FEATURES])
+        model.fit(train[FEATURES], train[target_col] * TARGET_SCALE, verbose=False)
+        pred = model.predict(valid[FEATURES]) / TARGET_SCALE
         actual = valid[target_col].to_numpy()
         current = valid["close"].to_numpy(dtype=float)
         actual_price = current * np.exp(actual)
         pred_price = current * np.exp(pred)
         residual_std = float(np.std(actual - pred, ddof=1)) if len(actual) > 1 else 0.0
-     
+
         model_final = _new_model(selected_params)
-        model_final.fit(frame[FEATURES], frame[target_col], verbose=False)
+        model_final.fit(frame[FEATURES], frame[target_col] * TARGET_SCALE, verbose=False)
         raw = bytes(model_final.get_booster().save_raw(raw_format="json"))
         q01, q99 = np.quantile(train[target_col], [0.01, 0.99])
+        horizon_clip = min(1.2, abs(settings.forecast_return_clip) * math.sqrt(horizon))
         db.models_direct.update_one(
             {"coin_id": coin_id, "horizon_days": horizon},
             {"$set": {
                 "coin_id": coin_id, "symbol": asset.get("symbol"), "horizon_days": horizon,
                 "model_raw_json": Binary(raw), "feature_columns": FEATURES,
-                "model_type": "XGBRegressorDirect", "trained_at": trained_at,
+                "model_type": "XGBRegressorDirect", "trained_at": trained_at, "target_scale": TARGET_SCALE,
                 "model_version": trained_at.strftime("%Y%m%dT%H%M%SZ"),
                 "history_source": source, "training_rows": int(len(frame)),
                 "validation_rows": int(len(valid)), "validation_gap_days": horizon, "validation_split": "80_20_temporal",
                 "residual_std": residual_std,
-                "return_clip_low": max(float(q01), -abs(settings.forecast_return_clip)),
-                "return_clip_high": min(float(q99), abs(settings.forecast_return_clip)),
+                "return_clip_low": max(float(q01), -horizon_clip),
+                "return_clip_high": min(float(q99), horizon_clip),
                 "mae_price_usd": float(mean_absolute_error(actual_price, pred_price)),
                 "rmse_price_usd": float(np.sqrt(mean_squared_error(actual_price, pred_price))),
                 "mape_price_pct": float(np.mean(np.abs((actual_price - pred_price) / actual_price)) * 100),
@@ -223,6 +227,7 @@ def _train_direct_models(db, coin_id, asset, prices, selected_params, source, tr
     return direct_metrics
 
 
+# Reunimos los datos, evaluamos XGBoost y guardamos los modelos de una criptomoneda.
 def train_one(coin_id):
     db = get_db()
     asset = db.assets.find_one({"coin_id": coin_id}) or {}
@@ -245,7 +250,7 @@ def train_one(coin_id):
     evaluation = _evaluate_walk_forward(feat, selected_params)
 
     model = _new_model(selected_params)
-    model.fit(feat[FEATURES], feat["target_log_return_next"])
+    model.fit(feat[FEATURES], feat["target_log_return_next"] * TARGET_SCALE)
     trained_at = datetime.now(timezone.utc)
 
     target = feat["target_log_return_next"].to_numpy()
@@ -271,6 +276,7 @@ def train_one(coin_id):
         "training_end": pd.Timestamp(feat.iloc[-1]["date"]).to_pydatetime(),
         "training_rows": int(len(feat)),
         "target": "next_day_log_return",
+        "target_scale": TARGET_SCALE,
         "hyperparameters": selected_params,
         **evaluation,
         "feature_importance": feature_importance,
@@ -285,6 +291,7 @@ def train_one(coin_id):
         "history_source": source,
         "feature_columns": FEATURES,
         "model_type": "XGBRegressor",
+        "target_scale": TARGET_SCALE,
         "target": "next_day_log_return",
         "model_raw_json": Binary(raw),
         "trained_at": trained_at,
@@ -298,10 +305,12 @@ def train_one(coin_id):
     }}, upsert=True)
     db.model_metrics.insert_one(metrics)
     direct_metrics = _train_direct_models(db, coin_id, asset, prices, selected_params, source, trained_at)
+    db.models_direct.delete_many({"coin_id": coin_id, "model_version": {"$ne": model_version}})
     db.model_metrics.update_one({"_id": db.model_metrics.find_one({"coin_id": coin_id, "trained_at": trained_at}, {"_id": 1})["_id"]}, {"$set": {"direct_horizon_metrics": direct_metrics}})
     return {"status": "trained", **metrics}
 
 
+# Repetimos el entrenamiento para todas las criptomonedas activas del proyecto.
 def train_all():
     db = get_db()
     ids = [x["coin_id"] for x in db.assets.find({"active_top_n": True}, {"coin_id": 1}).sort("rank", 1)]
@@ -314,12 +323,8 @@ def _load_booster(model_doc):
     return booster
 
 
+# Estimamos variaciones entre las fechas clave con el modelo diario, sin añadir ruido aleatorio.
 def _daily_model_shape(prices, model_doc, days, anchor_days):
-    """Señal diaria real del modelo 1d; no añade ruido aleatorio.
-
-    Se proyecta de forma recursiva y se centra dentro de cada intervalo
-    para conservar exactamente los niveles estimados por modelos directos.
-    """
     if not model_doc or not anchor_days or days < 2:
         return np.zeros(days + 1)
     try:
@@ -336,7 +341,7 @@ def _daily_model_shape(prices, model_doc, days, anchor_days):
             if feat.empty:
                 return np.zeros(days + 1)
             X = feat.iloc[[-1]][FEATURES]
-            delta = float(booster.predict(DMatrix(X, feature_names=FEATURES))[0])
+            delta = float(booster.predict(DMatrix(X, feature_names=FEATURES))[0]) / float(model_doc.get("target_scale", 1.0))
             delta = float(np.clip(delta, lo, hi))
             running[d] = running[d-1] + delta
             next_date = pd.Timestamp(path.iloc[-1]["date"]) + pd.Timedelta(days=1)
@@ -359,6 +364,7 @@ def _daily_model_shape(prices, model_doc, days, anchor_days):
         return np.zeros(days + 1)
 
 
+# Unimos los pronósticos por horizonte con las variaciones diarias para formar la trayectoria.
 def _direct_forecast_docs(db, coin_id, asset, prices, source, days, model_version, generated_at, run_id, model_doc=None):
     direct = list(db.models_direct.find({"coin_id": coin_id}, {"_id": 0}).sort("horizon_days", 1))
     direct = [x for x in direct if int(x.get("horizon_days", 0)) <= days
@@ -374,7 +380,7 @@ def _direct_forecast_docs(db, coin_id, asset, prices, source, days, model_versio
     anchors = [(0, math.log(base_price), 0.0)]
     for doc in direct:
         booster = _load_booster(doc)
-        pred_return = float(booster.predict(DMatrix(X, feature_names=FEATURES))[0])
+        pred_return = float(booster.predict(DMatrix(X, feature_names=FEATURES))[0]) / float(doc.get("target_scale", 1.0))
         pred_return = float(np.clip(pred_return, doc.get("return_clip_low", -0.25), doc.get("return_clip_high", 0.25)))
         uncertainty = 1.2815515655446004 * float(doc.get("residual_std") or 0.0)
         anchors.append((int(doc["horizon_days"]), math.log(base_price) + pred_return, uncertainty))
@@ -403,9 +409,12 @@ def _direct_forecast_docs(db, coin_id, asset, prices, source, days, model_versio
     return docs
 
 
+# Generamos hasta 365 días de precios futuros y los guardamos en MongoDB.
 def forecast_one(coin_id: str, days: int | None = None):
     db = get_db()
-    days = int(days or settings.forecast_days)
+    days = min(int(days or settings.forecast_days), MAX_FORECAST_DAYS)
+    if days < 1:
+        return {"coin_id": coin_id, "status": "invalid_forecast_days"}
     model_doc = db.models.find_one({"coin_id": coin_id})
     if not model_doc:
         return {"coin_id": coin_id, "status": "no_model"}
@@ -435,6 +444,7 @@ def forecast_one(coin_id: str, days: int | None = None):
     run_key = f"{coin_id}|{model_version}|{generated_at.isoformat()}|{days}"
     run_id = hashlib.sha256(run_key.encode()).hexdigest()[:24]
 
+    # Preferimos la combinación de modelos por horizonte; si falta cobertura, usamos el modelo diario.
     direct_docs = _direct_forecast_docs(db, coin_id, asset, prices, source, days, model_version, generated_at, run_id, model_doc=model_doc)
     if direct_docs:
         db.forecasts_daily.update_many({"coin_id": coin_id, "is_latest": True}, {"$set": {"is_latest": False}})
@@ -451,6 +461,7 @@ def forecast_one(coin_id: str, days: int | None = None):
             "base_date": pd.Timestamp(prices.iloc[-1]["date"]).to_pydatetime(),
             "base_price": float(prices.iloc[-1]["close"]), "model_version": model_version,
             "interval": "direct_horizon_models_hybrid_daily_shape_p10_p90",
+            "forecast_method": "direct_horizons_hybrid",
             "history_age_days": age_days, "history_warning": age_days > HISTORY_WARNING_DAYS, "is_latest": True,
         }}, upsert=True)
         return {"coin_id": coin_id, "status": "forecasted", "forecast_run_id": run_id, "days": days,
@@ -476,7 +487,7 @@ def forecast_one(coin_id: str, days: int | None = None):
             return {"coin_id": coin_id, "status": "insufficient_features_during_forecast", "horizon": horizon}
         last = feat.iloc[-1]
         X = pd.DataFrame([last[FEATURES].to_dict()])[FEATURES]
-        pred_log_return = float(booster.predict(DMatrix(X, feature_names=FEATURES))[0])
+        pred_log_return = float(booster.predict(DMatrix(X, feature_names=FEATURES))[0]) / float(model_doc.get("target_scale", 1.0))
         pred_log_return = float(np.clip(pred_log_return, clip_low, clip_high))
 
         current_price = float(path.iloc[-1]["close"])
@@ -536,6 +547,7 @@ def forecast_one(coin_id: str, days: int | None = None):
         "model_version": model_version,
         "residual_std": residual_std,
         "interval": "approx_p10_p90_from_walk_forward_residual_std",
+        "forecast_method": "recursive_fallback",
         "is_latest": True,
     }}, upsert=True)
 
@@ -546,16 +558,12 @@ def forecast_one(coin_id: str, days: int | None = None):
         "days": days,
         "base_price": last_real_price,
         "final_predicted_price": float(path.iloc[-1]["close"]),
+        "forecast_method": "recursive_fallback",
     }
 
 
+# Ejecutamos la predicción para todas las criptomonedas activas.
 def forecast_all(days: int | None = None):
-    """Genera forecast solo para los activos vigentes del Top N.
-
-    Evita arrastrar modelos antiguos de monedas que ya no forman parte del universo
-    activo. Los stablecoins pueden aparecer con estado ``no_model`` porque se omiten
-    deliberadamente durante el entrenamiento.
-    """
     db = get_db()
     ids = [
         x["coin_id"]
