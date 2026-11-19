@@ -509,8 +509,8 @@ with predictive:
                 )
             
             st.markdown("---")
-            
-    with st.expander("Métricas de validación del modelo"):
+    
+    with st.expander("Métricas de validación del modelo (simulación)"):
 
         def formato_adaptativo(valor):
             if valor is None or pd.isna(valor):
@@ -535,8 +535,6 @@ with predictive:
             None
         )
 
-        mae_usd = mae_usd / 2 if mae_usd is not None else None
-
         mape = (
             float(metric["mape_price_pct"])
             if metric.get("mape_price_pct") is not None
@@ -551,6 +549,12 @@ with predictive:
             else None
         )
 
+        factor_simulacion = 10
+
+        mae_usd = mae_usd / factor_simulacion if mae_usd is not None else None
+        mape = mape / factor_simulacion if mape is not None else None
+        rmse = rmse / factor_simulacion if rmse is not None else None
+
         with cm1:
             with st.container(border=True):
                 st.metric(
@@ -560,10 +564,9 @@ with predictive:
                 )
                 st.markdown("**¿Cuántos dólares se equivoca?**")
                 st.caption(
-                    "Muestra la diferencia promedio entre el precio estimado "
-                    "y el precio real, expresada en dólares."
+                    "Muestra el error promedio en dólares "
+                    "en esta simulación de resultados."
                 )
-
 
         with cm2:
             with st.container(border=True):
@@ -573,8 +576,8 @@ with predictive:
                 )
                 st.markdown("**¿Qué porcentaje se equivoca?**")
                 st.caption(
-                    "Indica el porcentaje promedio de diferencia entre "
-                    "los precios estimados y los reales."
+                    "Representa el error porcentual promedio "
+                    "en esta simulación de resultados."
                 )
 
         with cm3:
@@ -585,10 +588,15 @@ with predictive:
                 )
                 st.markdown("**¿Qué tan grandes pueden ser los errores?**")
                 st.caption(
-                    "Mide el error dando mayor importancia a las "
-                    "diferencias grandes entre la predicción y el precio real."
+                    "Representa el error relativo, dando mayor "
+                    "importancia a las diferencias grandes."
                 )
 
+        st.caption(
+            "Valores simulados para demostración, obtenidos mediante "
+            "un factor de escala de 10. No representan las métricas "
+            "reales de validación de XGBoost."
+        )
 
         if run and run.get("generated_at"):
             fecha_generacion = pd.to_datetime(
