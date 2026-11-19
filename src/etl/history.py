@@ -226,7 +226,7 @@ def load_binance_ohlcv(days=None):
 def build_market_daily(days=None):
     """Construye la serie canonica diaria usada por ML y Power BI.
 
-    Prioridad por dia: Mobula OHLCV > Binance OHLCV > Mobula price history.
+    Prioridad por dia: Mobula OHLCV > Mobula precios > CoinGecko > Binance.
     Los datos faltantes no se inventan.
     """
     db = get_db()
@@ -243,7 +243,6 @@ def build_market_daily(days=None):
         coin_id = asset["coin_id"]
         by_date = {}
 
-        # 1) price history: base de cierre, cobertura amplia
         for r in db.price_history.find(
             {"coin_id": coin_id, "date": {"$gte": start_day}},
             {"_id": 0, "date": 1, "price": 1, "source": 1}
@@ -253,13 +252,19 @@ def build_market_daily(days=None):
             d = _utc_day(r["date"])
             if d >= _utc_day(now):
                 continue
+            source = r.get("source")
+            priority = {"mobula_asset_price_history": 2,
+                        "coingecko_market_chart": 3}.get(source)
+            if priority is None or float(r["price"]) <= 0:
+                continue
+            if d in by_date and by_date[d]["source_priority"] <= priority:
+                continue
             by_date[d] = {
                 "date": d, "open": None, "high": None, "low": None,
                 "close": float(r["price"]), "volume": None, "quote_volume": None,
-                "source": "mobula_asset_price_history", "source_priority": 3,
+                "source": source, "source_priority": priority,
             }
 
-        # 2) Binance OHLCV: reemplaza cuando hay OHLCV completo
         for r in db.binance_ohlcv.find(
             {"coin_id": coin_id, "timestamp": {"$gte": start_day}, "period": "1d"},
             {"_id": 0, "timestamp": 1, "open": 1, "high": 1, "low": 1, "close": 1,
@@ -270,16 +275,17 @@ def build_market_daily(days=None):
             d = _utc_day(r["timestamp"])
             if d >= _utc_day(now):
                 continue
+            if d in by_date and by_date[d]["source_priority"] <= 4:
+                continue
             by_date[d] = {
                 "date": d, "open": float(r["open"]), "high": float(r["high"]),
                 "low": float(r["low"]), "close": float(r["close"]),
                 "volume": float(r.get("volume") or 0),
                 "quote_volume": float(r.get("quote_volume") or 0),
-                "source": "binance_spot_1d", "source_priority": 2,
+                "source": "binance_spot_1d", "source_priority": 4,
                 "source_pair": r.get("pair"),
             }
 
-        # 3) Mobula token OHLCV: prioridad mas alta cuando existe
         for r in db.ohlcv.find(
             {"coin_id": coin_id, "timestamp": {"$gte": start_day}, "period": "1d"},
             {"_id": 0, "timestamp": 1, "open": 1, "high": 1, "low": 1, "close": 1,
@@ -316,7 +322,6 @@ def build_market_daily(days=None):
             ops.append(UpdateOne(
                 {"coin_id": coin_id, "date": d}, {"$set": doc}, upsert=True
             ))
-        # Una vela de hoy sigue abierta; nunca entra a entrenamiento ni al dashboard histórico.
         db.market_daily.delete_many({"coin_id": coin_id, "date": {"$gte": _utc_day(now)}})
         if ops:
             db.market_daily.bulk_write(ops, ordered=False)
@@ -368,3 +373,4 @@ def build_market_daily(days=None):
         summaries.append({"coin_id": coin_id, "rows": actual, "coverage_pct": round(coverage, 2), "sources": source_counts})
 
     return {"assets": len(assets), "rows_upserted": total_ops, "summary": summaries}
+
