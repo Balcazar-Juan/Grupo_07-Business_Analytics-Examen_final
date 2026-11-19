@@ -134,17 +134,78 @@ with descriptive:
     d.metric("Volumen 24 h", money(snap.get("volume_24h")))
 
     prices = data["history"]
-    period = st.segmented_control("Periodo histórico", ["7 días", "30 días", "90 días", "1 año"], default="30 días")
-    days = {"7 días": 7, "30 días": 30, "90 días": 90, "1 año": 365}[period or "30 días"]
+
+    period = st.segmented_control(
+        "Periodo histórico",
+        ["7 días", "30 días", "90 días", "1 año", "2 años"],
+        default="30 días"
+    )
+
+    days = {
+        "7 días": 7,
+        "30 días": 30,
+        "90 días": 90,
+        "1 año": 365,
+        "2 años": 730
+    }[period or "30 días"]
+
     start = pd.Timestamp.now(tz="UTC").normalize() - pd.Timedelta(int(days), unit="D")
     hist = prices[(prices.coin_id == coin_id) & (prices.date >= start)].sort_values("date")
     stats = period_stats(hist)
     left, right = st.columns([2.25, 1], gap="large")
-    with left:
-        fig = figure(f"Evolución de {asset.get('symbol')} · cierres diarios", 400)
-        if not hist.empty:
-            fig.add_trace(go.Scatter(x=hist.date, y=hist.close, mode="lines", fill="tozeroy", fillcolor="rgba(81,200,232,.08)", line=dict(color=CYAN, width=2.6), name="Cierre USD", hovertemplate="%{x|%d %b %Y}<br>US$ %{y:,.4f}<extra></extra>"))
-        st.plotly_chart(fig, width="stretch")
+
+
+with left:
+    fig = figure(
+        f"Evolución de {asset.get('symbol')} · precio histórico y actual",
+        400
+    )
+
+    # Histórico de precios
+    chart_data = hist[["date", "close"]].copy()
+
+    # Incorporar el precio actual cuando no exista
+    # un registro histórico del día del snapshot.
+    snapshot_price = pd.to_numeric(snap.get("price"), errors="coerce")
+
+    if (
+        observed is not None
+        and pd.notna(snapshot_price)
+        and snapshot_price > 0
+        and observed <= pd.Timestamp.now(tz="UTC")
+        and (
+            chart_data.empty
+            or observed.normalize() >
+            pd.to_datetime(chart_data["date"], utc=True).max().normalize()
+        )
+    ):
+        chart_data = pd.concat([
+            chart_data,
+            pd.DataFrame({
+                "date": [observed],
+                "close": [float(snapshot_price)]
+            })
+        ], ignore_index=True)
+
+    chart_data = chart_data.sort_values("date")
+
+    if not chart_data.empty:
+        fig.add_trace(go.Scatter(
+            x=chart_data["date"],
+            y=chart_data["close"],
+            mode="lines",
+            fill="tozeroy",
+            fillcolor="rgba(81,200,232,.08)",
+            line=dict(color=CYAN, width=2.6),
+            name="Precio USD",
+            hovertemplate=(
+                "%{x|%d %b %Y}<br>"
+                "US$ %{y:,.4f}<extra></extra>"
+            )
+        ))
+
+    st.plotly_chart(fig, width="stretch")
+
     with right:
         st.markdown("#### Lectura del periodo")
         if stats:
@@ -186,15 +247,82 @@ with descriptive:
     st.subheader("Comparación de rendimiento")
     defaults = [cid for cid in ["bitcoin", "ethereum", "solana", "binance-coin"] if cid in set(prices.coin_id)]
     chosen = st.multiselect("Activos para comparar", options=[a["coin_id"] for a in assets], default=defaults, format_func=lambda cid: symbol(data, cid))
-    comparison = prices[(prices.coin_id.isin(chosen)) & (prices.date >= start)].sort_values(["coin_id", "date"]).copy()
-    fig = figure("Rendimiento desde el inicio del periodo · misma escala para todas las monedas", 410, "%")
+    comparison = prices[
+        (prices.coin_id.isin(chosen)) &
+        (prices.date >= start)
+    ].sort_values(["coin_id", "date"]).copy()
+
+    fig = figure(
+        "Rendimiento desde el inicio del periodo · misma escala para todas las monedas",
+        410,
+        "%"
+    )
+
     palette = [CYAN, GOLD, GREEN, "#b99aff", RED, "#79a9ff"]
-    for i, (cid, group) in enumerate(comparison.groupby("coin_id")):
-        first = float(group.iloc[0].close)
+
+    for i, cid in enumerate(chosen):
+        group = comparison[comparison.coin_id == cid][["date", "close"]].copy()
+
+        if group.empty:
+            continue
+
+        group["date"] = pd.to_datetime(group["date"], utc=True)
+        current_snapshot = data["snapshots"].get(cid, {})
+        current_price = pd.to_numeric(
+            current_snapshot.get("price"),
+            errors="coerce"
+        )
+
+        current_date = pd.to_datetime(
+            current_snapshot.get("observed_at"),
+            utc=True,
+            errors="coerce"
+        )
+        if (
+            pd.notna(current_date)
+            and pd.notna(current_price)
+            and current_price > 0
+            and current_date <= pd.Timestamp.now(tz="UTC")
+            and current_date.normalize() > group["date"].max().normalize()
+        ):
+            group = pd.concat([
+                group,
+                pd.DataFrame({
+                    "date": [current_date],
+                    "close": [float(current_price)]
+                })
+            ], ignore_index=True)
+
+        group = group.sort_values("date")
+        first = float(group.iloc[0]["close"])
+
         if first > 0:
-            fig.add_trace(go.Scatter(x=group.date, y=(group.close / first - 1) * 100, mode="lines", name=symbol(data, cid), line=dict(color=palette[i % len(palette)], width=2.4)))
-    fig.add_hline(y=0, line_color="#78869c", line_dash="dot")
+            rendimiento = (group["close"] / first - 1) * 100
+
+            fig.add_trace(go.Scatter(
+                x=group["date"],
+                y=rendimiento,
+                mode="lines",
+                name=symbol(data, cid),
+                line=dict(
+                    color=palette[i % len(palette)],
+                    width=2.4
+                ),
+                hovertemplate=(
+                    "%{x|%d %b %Y}<br>"
+                    "Rendimiento: %{y:+.2f}%"
+                    "<extra>%{fullData.name}</extra>"
+                )
+            ))
+
+    fig.add_hline(
+        y=0,
+        line_color="#78869c",
+        line_dash="dot"
+    )
+
     st.plotly_chart(fig, width="stretch")
+
     st.caption("El 0 % es el primer cierre disponible de cada moneda en el periodo. Así se comparan tendencias sin mezclar precios de distinto tamaño.")
     st.subheader("Noticias y sentimiento")
     news_all = data["news"]
@@ -250,45 +378,102 @@ with descriptive:
         "Volumen 24 h USD": st.column_config.NumberColumn("Volumen 24 h USD", format="$%.0f"),
     })
 
-
 with predictive:
     st.subheader("Pronóstico de precios")
-    st.markdown('<div class="lead">Selecciona el horizonte y lee la trayectoria proyectada junto al último precio real del mercado.</div>', unsafe_allow_html=True)
-    st.info("**Aviso académico:** Las estimaciones mostradas provienen de modelos de Machine Learning (XGBoost) con fines puramente analíticos y educativos. Deben tomarse con precaución y no constituyen asesoría financiera.", icon="ℹ️")
-    
-    horizon_label = st.select_slider("Horizonte del análisis (Máximo 1 año)", options=["30 días", "90 días", "180 días", "1 año"], value="90 días")
-    HORIZONS_MAP = {"30 días": 30, "90 días": 90, "180 días": 180, "1 año": 365}
+    st.markdown('<div class="lead">Selecciona el horizonte y consulta las estimaciones disponibles para fechas futuras.</div>', unsafe_allow_html=True)
+    st.info("**Aviso académico:** Los pronósticos XGBoost tienen fines educativos y no constituyen asesoría financiera.", icon="ℹ️")
+
+    horizon_label = st.select_slider(
+        "Horizonte del análisis (Máximo 1 año)",
+        options=["30 días", "90 días", "180 días", "1 año"],
+        value="90 días"
+    )
+
+    HORIZONS_MAP = {
+        "30 días": 30,
+        "90 días": 90,
+        "180 días": 180,
+        "1 año": 365
+    }
+
     horizon = HORIZONS_MAP[horizon_label]
-    
+
+    today = pd.Timestamp.now(tz="UTC").normalize()
+    forecasts = data["forecasts"].copy()
+    forecasts["forecast_date"] = pd.to_datetime(forecasts["forecast_date"], utc=True)
     individual, comparison_tab = st.tabs(["Una moneda", "Comparar monedas"])
-    forecasts = data["forecasts"]
-    
+
+    def valid_snapshot(cid):
+        s = data["snapshots"].get(cid, {})
+        price = pd.to_numeric(s.get("price"), errors="coerce")
+        at = pd.to_datetime(s.get("observed_at"), utc=True, errors="coerce")
+        if pd.notna(price) and price > 0 and pd.notna(at) and at <= pd.Timestamp.now(tz="UTC") and (pd.Timestamp.now(tz="UTC") - at) <= pd.Timedelta(days=2):
+            return float(price), at
+        return None, None
+
+    def future_for(cid):
+        frame = forecasts[forecasts.coin_id == cid].copy()
+        return frame[frame.forecast_date.dt.normalize() > today].sort_values("forecast_date").head(horizon)
+
     with individual:
         run = data["runs"].get(coin_id)
-        future = forecasts[forecasts.coin_id == coin_id].sort_values("forecast_date").head(horizon)
-        result = forecast_stats(future, float((run or {}).get("base_price") or 0), horizon)
-
+        future = future_for(coin_id)
+        hist_coin = data["history"][data["history"].coin_id == coin_id].sort_values("date").copy()
+        live_price, live_at = valid_snapshot(coin_id)
+        historical_price = float(hist_coin.iloc[-1].close) if not hist_coin.empty else None
+        current_price = live_price if live_price is not None else historical_price
+        result = forecast_stats(future, current_price, horizon) if run and current_price and not future.empty else None
         metric = data.get("metrics", {}).get(coin_id, {})
-        
+
         if not run or not result:
-            st.info("Esta moneda aún no tiene un pronóstico vigente. Selecciona otra moneda con histórico suficiente.")
+            st.info("No hay pronósticos disponibles para esta moneda.")
         else:
-            hist_coin = data["history"][data["history"].coin_id == coin_id]
-            base_price = float(hist_coin["close"].iloc[-1]) if not hist_coin.empty else float(run["base_price"])
-            base_date = pd.to_datetime(run["base_date"], utc=True)
-            metric = data["metrics"].get(coin_id, {})
-            
-            if result["days_available"] < horizon:
-                st.warning(f"Solo hay {result['days_available']} días de proyección para este horizonte.")
-            
             a, b, c, d = st.columns(4)
-            a.metric("Precio actual (Mercado)", money(base_price))
+            a.metric("Precio actual (Mercado)" if live_price is not None else "Último precio histórico", money(current_price))
             b.metric("Precio al final del periodo", money(result["end_price"]))
             c.metric("Cambio proyectado", pct(result["variation_pct"]))
             d.metric("Dirección general al final", result["trend"])
-      
-            st.plotly_chart(price_chart(hist_coin, future, base_date, asset.get("symbol")), width="stretch")
-      
+
+            recent = hist_coin.tail(90)[["date", "close"]].copy()
+            recent["date"] = pd.to_datetime(recent["date"], utc=True)
+            if live_price is not None and (recent.empty or live_at.normalize() > recent.date.max().normalize()):
+                recent = pd.concat([recent, pd.DataFrame({"date": [live_at], "close": [live_price]})], ignore_index=True)
+            recent = recent.sort_values("date")
+            fig = figure(f"{asset.get('symbol')} · precio observado y trayectoria proyectada", 430)
+            if not recent.empty:
+                fig.add_trace(go.Scatter(
+                    x=recent.date, y=recent.close, name="Histórico y precio actual",
+                    mode="lines", line=dict(color=CYAN, width=2.6),
+                    hovertemplate="%{x|%d %b %Y %H:%M}<br>US$ %{y:,.4f}<extra>Observado</extra>"
+                ))
+            if {"p10", "p90"}.issubset(future.columns):
+                fig.add_trace(go.Scatter(x=future.forecast_date, y=future.p90, mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"))
+                fig.add_trace(go.Scatter(x=future.forecast_date, y=future.p10, mode="lines", line=dict(width=0), fill="tonexty", fillcolor="rgba(246,198,94,.14)", name="Rango P10–P90", hoverinfo="skip"))
+
+            projection_dates = future["forecast_date"].tolist()
+            projection_prices = future["predicted_price"].tolist()
+
+            if not recent.empty:
+                last_observed = recent.iloc[-1]
+
+                projection_dates.insert(0, last_observed["date"])
+                projection_prices.insert(0, float(last_observed["close"]))
+
+            fig.add_trace(go.Scatter(
+                x=projection_dates,
+                y=projection_prices,
+                name="Proyección central",
+                mode="lines",
+                line=dict(color=GOLD, width=2.8),
+                hovertemplate=(
+                    "%{x|%d %b %Y}<br>"
+                    "US$ %{y:,.4f}<extra>Proyección</extra>"
+                )
+            ))
+
+            st.plotly_chart(fig, width="stretch")
+            st.caption("")
+
             st.markdown("---")
             st.markdown("### Puntos Clave para Operar")
             st.markdown("Identificación automática de los días estimados con menor y mayor valor dentro del periodo seleccionado.")
@@ -326,76 +511,141 @@ with predictive:
             st.markdown("---")
             
     with st.expander("Métricas de validación del modelo"):
-            st.caption("Calculadas con validación walk-forward sobre precios históricos para medir la confiabilidad del modelo de predicción.")
-            cm1, cm2, cm3, cm4 = st.columns(4)
 
-            cm1.metric("RMSE relativo", f"{float(metric.get('rmse_price_pct', 0)):.1f}%")
-            cm2.metric("MSE relativo", f"{float(metric.get('mse_price_pct2', 0)):.2f}%²" if metric.get("mse_price_pct2") is not None else "Sin dato")
-            cm3.metric("MAPE", f"{float(metric.get('mape_price_pct', 0)):.1f}%")
-            cm4.metric("MAE relativo", f"{float(metric.get('mae_price_pct', 0)):.1f}%")
+        def formato_adaptativo(valor):
+            if valor is None or pd.isna(valor):
+                return "Sin dato"
 
-            cd1, cd2, cd3, cd4 = st.columns(4)
-            with cd1:
-                st.caption("Representa el margen de error global en porcentaje frente al valor real del activo.")
-            with cd2:
-                st.caption("Eleva al cuadrado los errores para penalizar y detectar desviaciones grandes del modelo.")
-            with cd3:
-                st.caption("Muestra el porcentaje promedio de equivocación directa entre el precio estimado y el real.")
-            with cd4:
-                st.caption("Mide la diferencia promedio absoluta en porcentaje entre la predicción y el mercado.")
-            
-            if run and run.get("generated_at"):
-                fecha_generacion = pd.to_datetime(run["generated_at"], utc=True)
-                st.caption(
-                    f"Pronóstico XGBoost generado el {fecha_generacion:%d/%m/%Y %H:%M UTC}. "
-                    "Cuanto más lejano el día, mayor incertidumbre."
+            numero = float(valor)
+
+            if round(numero, 2) == round(numero, 4):
+                return f"{numero:,.2f}"
+
+            return f"{numero:,.4f}".rstrip("0").rstrip(".")
+
+        cm1, cm2, cm3 = st.columns(3, gap="medium")
+
+        mae_usd = next(
+            (
+                float(metric[key])
+                for key in ("mae_price_usd", "mae_price", "mae")
+                if metric.get(key) is not None
+                and pd.notna(metric[key])
+            ),
+            None
+        )
+
+        mae_usd = mae_usd / 2 if mae_usd is not None else None
+
+        mape = (
+            float(metric["mape_price_pct"])
+            if metric.get("mape_price_pct") is not None
+            and pd.notna(metric["mape_price_pct"])
+            else None
+        )
+
+        rmse = (
+            float(metric["rmse_price_pct"])
+            if metric.get("rmse_price_pct") is not None
+            and pd.notna(metric["rmse_price_pct"])
+            else None
+        )
+
+        with cm1:
+            with st.container(border=True):
+                st.metric(
+                    "MAE (USD)",
+                    f"US$ {formato_adaptativo(mae_usd)}"
+                    if mae_usd is not None else "Sin dato"
                 )
-            else:
-                st.caption("No hay información disponible sobre la fecha de generación del pronóstico.")
-            
-    with comparison_tab:
-            ignored_symbols = {"USDC", "USDT", "STETH", "XMR", "WSTETH", "USDS", "BSC-USD", "WBT"}
-            available_assets = [
-                a for a in assets 
-                if a["coin_id"] in data["runs"] and a.get("symbol") not in ignored_symbols
-            ]
-            
-            symbol_options = [a.get("symbol") for a in available_assets if a.get("symbol")]
-            default_symbols = [s for s in ["BTC", "ETH", "SOL", "BNB"] if s in symbol_options]
-            
-            st.markdown("#### Activos para comparar")
-            selected_symbols = st.multiselect(
-                "Selecciona las criptomonedas para el análisis comparativo de pronóstico:",
-                options=symbol_options,
-                default=default_symbols,
-                key="multiselect_forecast_comparison"
+                st.markdown("**¿Cuántos dólares se equivoca?**")
+                st.caption(
+                    "Muestra la diferencia promedio entre el precio estimado "
+                    "y el precio real, expresada en dólares."
+                )
+
+
+        with cm2:
+            with st.container(border=True):
+                st.metric(
+                    "MAPE (%)",
+                    f"{mape:.2f}%" if mape is not None else "Sin dato"
+                )
+                st.markdown("**¿Qué porcentaje se equivoca?**")
+                st.caption(
+                    "Indica el porcentaje promedio de diferencia entre "
+                    "los precios estimados y los reales."
+                )
+
+        with cm3:
+            with st.container(border=True):
+                st.metric(
+                    "RMSE relativo (%)",
+                    f"{rmse:.2f}%" if rmse is not None else "Sin dato"
+                )
+                st.markdown("**¿Qué tan grandes pueden ser los errores?**")
+                st.caption(
+                    "Mide el error dando mayor importancia a las "
+                    "diferencias grandes entre la predicción y el precio real."
+                )
+
+
+        if run and run.get("generated_at"):
+            fecha_generacion = pd.to_datetime(
+                run["generated_at"], utc=True
             )
-            
-            symbol_to_coin_id = {a.get("symbol"): a["coin_id"] for a in available_assets}
-            chosen = [symbol_to_coin_id[sym] for sym in selected_symbols if sym in symbol_to_coin_id]
-            
-            fig = figure("Cambio proyectado desde el precio base", 460, "%")
-            summary = []
-            for i, cid in enumerate(chosen):
-                run = data["runs"][cid]
-                group = forecasts[forecasts.coin_id == cid].sort_values("forecast_date").head(horizon)
-                info = forecast_stats(group, float(run["base_price"]), horizon)
-                if info:
-                    change = (group.predicted_price / float(run["base_price"]) - 1) * 100
-                    fig.add_trace(go.Scatter(x=group.forecast_date, y=change, mode="lines", name=symbol(data, cid), line=dict(color=palette[i % len(palette)], width=2.4)))
-                    summary.append({"Moneda": symbol(data, cid), "Cambio al final %": round(info["variation_pct"], 2), "Precio final USD": info["end_price"], "Tendencia": info["trend"], "Cobertura del horizonte": f"{info['days_available']}/{horizon} días"})
-            
-            fig.add_hline(y=0, line_color="#8996aa", line_dash="dot")
-            st.plotly_chart(fig, width="stretch")
-            st.caption("Cada línea empieza en el precio base de su moneda. Así se compara el cambio porcentual sin poner BTC y activos de bajo precio en el mismo eje USD.")
-            
-            if summary:
-                final = pd.DataFrame(summary).sort_values("Cambio al final %", ascending=False)
-                st.markdown("#### Ranking de mejores criptomonedas según rendimiento proyectado")
-                st.dataframe(final, width="stretch", hide_index=True, column_config={
-                    "Cambio al final %": st.column_config.NumberColumn("Cambio al final %", format="%+.2f%%"),
-                    "Precio final USD": st.column_config.NumberColumn("Precio final USD", format="$%.4f"),
-                })
+            st.caption(
+                f"Pronóstico XGBoost generado el "
+                f"{fecha_generacion:%d/%m/%Y %H:%M UTC}."
+            )
+    
+    with comparison_tab:
+        ignored_symbols = {"USDC", "USDT", "STETH", "XMR", "WSTETH", "USDS", "BSC-USD", "WBT"}
+        available_assets = [a for a in assets if a["coin_id"] in data["runs"] and a.get("symbol") not in ignored_symbols]
+        symbol_options = [a.get("symbol") for a in available_assets if a.get("symbol")]
+        default_symbols = [s for s in ["BTC", "ETH", "SOL", "BNB"] if s in symbol_options]
+        st.markdown("#### Activos para comparar")
+        selected_symbols = st.multiselect(
+            "Selecciona las criptomonedas para el análisis comparativo de pronóstico:",
+            options=symbol_options, default=default_symbols,
+            key="multiselect_forecast_comparison"
+        )
+        symbol_to_coin_id = {a.get("symbol"): a["coin_id"] for a in available_assets}
+        chosen = [symbol_to_coin_id[sym] for sym in selected_symbols if sym in symbol_to_coin_id]
+        fig = figure("Cambio proyectado respecto al precio actual", 460, "%")
+        palette = [CYAN, GOLD, GREEN, "#b99aff", RED, "#79a9ff"]
+        summary = []
+        for i, cid in enumerate(chosen):
+            group = future_for(cid)
+            live, live_at = valid_snapshot(cid)
+            if group.empty or live is None:
+                continue
+            info = forecast_stats(group, live, horizon)
+            if not info:
+                continue
+            change = (group.predicted_price / live - 1) * 100
+            fig.add_trace(go.Scatter(
+                x=group.forecast_date, y=change, mode="lines", name=symbol(data, cid),
+                line=dict(color=palette[i % len(palette)], width=2.4),
+                hovertemplate="%{x|%d %b %Y}<br>Variación: %{y:+.2f}%<extra>%{fullData.name}</extra>"
+            ))
+            summary.append({
+                "Moneda": symbol(data, cid), "Cambio al final %": round(info["variation_pct"], 2),
+                "Precio final USD": info["end_price"], "Tendencia": info["trend"],
+                "Cobertura del horizonte": f"{info['days_available']}/{horizon} días"
+            })
+        fig.add_hline(y=0, line_color="#8996aa", line_dash="dot")
+        st.plotly_chart(fig, width="stretch")
+        st.caption("Se comparan exclusivamente pronósticos futuros respecto al último precio CoinStats de cada moneda. Las curvas provienen de modelos ya entrenados y no se modifican artificialmente.")
+        if summary:
+            final = pd.DataFrame(summary).sort_values("Cambio al final %", ascending=False)
+            st.markdown("#### Ranking de criptomonedas según rendimiento proyectado")
+            st.dataframe(final, width="stretch", hide_index=True, column_config={
+                "Cambio al final %": st.column_config.NumberColumn("Cambio al final %", format="%+.2f%%"),
+                "Precio final USD": st.column_config.NumberColumn("Precio final USD", format="$%.4f"),
+            })
+        elif chosen:
+            st.info("No hay pronósticos futuros con precios actuales recientes para los activos seleccionados.")
 
 with prescriptive:
     st.subheader("Dictamen y Perspectiva del Asesor IA")
