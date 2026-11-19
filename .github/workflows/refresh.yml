@@ -12,13 +12,26 @@ on:
           - regular
           - daily
           - train
+
   schedule:
-    # Lima (UTC-5): 00:00, 06:00, 12:00, 18:00 -> mercado/noticias
+    # Todos los dias - 12:00 a. m.
+    # Actualiza precios, noticias, historicos y agente IA
     - cron: "0 5 * * *"
+
+    # Todos los dias - 6:00 a. m.:
+    #Actualiza precios, noticias, historicos y agente IA
     - cron: "0 11 * * *"
+
+    # Todos los dias - 12:00 p. m.
+      # Actualiza precios, noticias, historicos y agente IA
     - cron: "0 17 * * *"
+
+    # Todos los dias - 6:00 p. m.
+    # Actualiza precios, noticias, historicos y agente IA
     - cron: "0 23 * * *"
-    # Domingo 00:30 Lima -> reentrenamiento + forecast
+
+    # Todos los domingos - 12:30 a. m.:
+    # Actualiza precios, noticias e historicos; reentrena XGBoost
     - cron: "30 5 * * 0"
 
 jobs:
@@ -31,6 +44,7 @@ jobs:
       COINSTATS_API_KEY: ${{ secrets.COINSTATS_API_KEY }}
       MOBULA_API_KEY: ${{ secrets.MOBULA_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
       GEMINI_MODEL: "gemini-3.5-flash-lite"
       AI_HORIZON_DAYS: "30"
       AI_MAX_PER_RUN: "20"
