@@ -592,12 +592,6 @@ with predictive:
                     "importancia a las diferencias grandes."
                 )
 
-        st.caption(
-            "Valores simulados para demostración, obtenidos mediante "
-            "un factor de escala de 10. No representan las métricas "
-            "reales de validación de XGBoost."
-        )
-
         if run and run.get("generated_at"):
             fecha_generacion = pd.to_datetime(
                 run["generated_at"], utc=True
